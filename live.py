@@ -9,7 +9,7 @@ import yfinance as yf
 from strategy import generate_signal
 
 
-PRICE_URL = "https://api.gold-api.com/price/XAU"
+PRIMARY_PRICE_URL = "https://api.gold-api.com/price/XAU"
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = "6371468101"
@@ -20,16 +20,57 @@ HEARTBEAT_INTERVAL = 30
 
 
 def get_live_price():
-    response = requests.get(
-        PRICE_URL,
-        timeout=10
-    )
-    response.raise_for_status()
+    # Primary source
+    try:
+        response = requests.get(
+            PRIMARY_PRICE_URL,
+            timeout=10
+        )
 
-    return float(response.json()["price"])
+        response.raise_for_status()
+
+        price = float(response.json()["price"])
+
+        return price, "Gold API"
+
+    except Exception as primary_error:
+
+        print(
+            "PRIMARY PRICE ERROR:",
+            primary_error,
+            flush=True
+        )
+
+    # Fallback source
+    try:
+        gold = yf.Ticker("GC=F")
+
+        fallback_data = gold.history(
+            period="1d",
+            interval="1m"
+        )
+
+        if fallback_data.empty:
+            raise RuntimeError(
+                "Fallback returned no data."
+            )
+
+        price = float(
+            fallback_data["Close"].iloc[-1]
+        )
+
+        return price, "Yahoo Finance"
+
+    except Exception as fallback_error:
+
+        raise RuntimeError(
+            "ALL PRICE SOURCES FAILED. "
+            + str(fallback_error)
+        )
 
 
 def send_telegram(message):
+
     url = (
         "https://api.telegram.org/bot"
         + TELEGRAM_TOKEN
@@ -49,6 +90,7 @@ def send_telegram(message):
 
 
 def get_market_data():
+
     gold = yf.Ticker("GC=F")
 
     data_daily = gold.history(
@@ -70,11 +112,19 @@ def get_market_data():
 
 
 def get_current_15m_timestamp(index):
-    now = pd.Timestamp.now(tz=index.tz)
+
+    now = pd.Timestamp.now(
+        tz=index.tz
+    )
+
     return now.floor("15min")
 
 
-def update_live_candle(data_15m, price):
+def update_live_candle(
+    data_15m,
+    price
+):
+
     data_15m = data_15m.copy()
 
     timestamp = get_current_15m_timestamp(
@@ -92,10 +142,12 @@ def update_live_candle(data_15m, price):
             timestamp,
             "High"
         ] = max(
-            float(data_15m.loc[
-                timestamp,
-                "High"
-            ]),
+            float(
+                data_15m.loc[
+                    timestamp,
+                    "High"
+                ]
+            ),
             price
         )
 
@@ -103,10 +155,12 @@ def update_live_candle(data_15m, price):
             timestamp,
             "Low"
         ] = min(
-            float(data_15m.loc[
-                timestamp,
-                "Low"
-            ]),
+            float(
+                data_15m.loc[
+                    timestamp,
+                    "Low"
+                ]
+            ),
             price
         )
 
@@ -124,45 +178,76 @@ def update_live_candle(data_15m, price):
         )
 
         data_15m = pd.concat(
-            [data_15m, candle]
+            [
+                data_15m,
+                candle
+            ]
         )
 
     return data_15m
 
 
-def format_signal_message(signal, price):
+def format_signal_message(
+    signal,
+    price
+):
 
     message = (
         "XAUUSD SIGNAL\n\n"
-        "Signal: " + signal["signal"] + "\n"
-        "Price: " + str(round(price, 2)) + "\n"
-        "Reason: " + signal["reason"] + "\n"
+        "Signal: "
+        + signal["signal"]
+        + "\n"
+        "Price: "
+        + str(round(price, 2))
+        + "\n"
+        "Reason: "
+        + signal["reason"]
+        + "\n"
         "Overall Bias: "
         + signal["bias"]["overall"]
     )
 
     if signal.get("aoi"):
+
         message += (
             "\n\nAOI: "
             + str(signal["aoi"])
         )
 
     if signal.get("entry") is not None:
+
         message += (
             "\n\nEntry: "
-            + str(round(signal["entry"], 2))
+            + str(
+                round(
+                    signal["entry"],
+                    2
+                )
+            )
         )
 
     if signal.get("stop_loss") is not None:
+
         message += (
             "\nStop Loss: "
-            + str(round(signal["stop_loss"], 2))
+            + str(
+                round(
+                    signal["stop_loss"],
+                    2
+                )
+            )
         )
 
     if signal.get("take_profit") is not None:
+
         message += (
             "\nTake Profit: "
-            + str(round(signal["take_profit"], 2))
+            + str(
+                round(
+                    signal["take_profit"],
+                    2
+                )
+            )
         )
 
     return message
@@ -174,7 +259,9 @@ print("LIVE XAUUSD SIGNAL BOT")
 print("=" * 60)
 print()
 
-print("Loading historical market data...")
+print(
+    "Loading historical market data..."
+)
 
 data_15m, data_daily = get_market_data()
 
@@ -187,35 +274,57 @@ print(
 )
 
 print()
-print("Live price: EVERY 1 SECOND")
-print("Historical refresh: EVERY 60 SECONDS")
-print("Telegram alerts: ENABLED")
-print("Waiting for BUY or SELL...")
-print("Press Ctrl+C to stop.")
+print(
+    "Live price: EVERY 1 SECOND"
+)
+print(
+    "Historical refresh: EVERY 60 SECONDS"
+)
+print(
+    "Telegram alerts: ENABLED"
+)
+print(
+    "Primary price source: Gold API"
+)
+print(
+    "Fallback price source: Yahoo Finance"
+)
+print(
+    "Waiting for BUY or SELL..."
+)
+print(
+    "Press Ctrl+C to stop."
+)
 print()
 
 last_data_refresh = time.time()
 last_heartbeat = time.time()
 
-# Prevent duplicate alerts for the same signal.
 last_alert_key = None
 
 while True:
 
     try:
 
-        # Refresh historical market data.
+        # Refresh historical data
         if (
-            time.time() - last_data_refresh
+            time.time()
+            - last_data_refresh
             >= DATA_REFRESH_INTERVAL
         ):
 
             print()
-            print("Refreshing market data...")
+            print(
+                "Refreshing market data..."
+            )
 
-            data_15m, data_daily = get_market_data()
+            data_15m, data_daily = (
+                get_market_data()
+            )
 
-            last_data_refresh = time.time()
+            last_data_refresh = (
+                time.time()
+            )
 
             print(
                 "Data refreshed:",
@@ -225,33 +334,45 @@ while True:
                 "daily candles"
             )
 
-        # Get live XAU price.
-        price = get_live_price()
+        # Get live price
+        price, price_source = (
+            get_live_price()
+        )
 
-        # Update the current 15-minute candle.
+        # Update current 15m candle
         data_15m = update_live_candle(
             data_15m,
             price
         )
 
-        # Run the existing strategy.
+        # Run strategy
         signal = generate_signal(
             data_15m,
             data_daily,
             price
         )
 
-        current_signal = signal["signal"]
+        current_signal = (
+            signal["signal"]
+        )
 
-        # -------------------------------------------------
-        # TELEGRAM ALERT
-        # -------------------------------------------------
+        # Telegram alert
+        if current_signal in (
+            "BUY",
+            "SELL"
+        ):
 
-        if current_signal in ("BUY", "SELL"):
+            entry = signal.get(
+                "entry"
+            )
 
-            entry = signal.get("entry")
-            stop_loss = signal.get("stop_loss")
-            take_profit = signal.get("take_profit")
+            stop_loss = signal.get(
+                "stop_loss"
+            )
+
+            take_profit = signal.get(
+                "take_profit"
+            )
 
             alert_key = (
                 current_signal,
@@ -263,15 +384,17 @@ while True:
 
             if alert_key != last_alert_key:
 
-                message = format_signal_message(
-                    signal,
-                    price
+                send_telegram(
+                    format_signal_message(
+                        signal,
+                        price
+                    )
                 )
 
-                send_telegram(message)
-
                 print()
-                print("=" * 60)
+                print(
+                    "=" * 60
+                )
                 print(
                     datetime.now().strftime(
                         "%Y-%m-%d %H:%M:%S"
@@ -286,26 +409,36 @@ while True:
                     round(price, 2)
                 )
                 print(
+                    "SOURCE:",
+                    price_source
+                )
+                print(
                     "TELEGRAM: SIGNAL SENT"
                 )
-                print("=" * 60)
+                print(
+                    "=" * 60
+                )
 
-                last_alert_key = alert_key
+                last_alert_key = (
+                    alert_key
+                )
 
-        # -------------------------------------------------
-        # HEARTBEAT
-        # -------------------------------------------------
-
+        # Heartbeat
         if (
-            time.time() - last_heartbeat
+            time.time()
+            - last_heartbeat
             >= HEARTBEAT_INTERVAL
         ):
 
             print(
-                datetime.now().strftime("%H:%M:%S"),
+                datetime.now().strftime(
+                    "%H:%M:%S"
+                ),
                 "| BOT ALIVE",
                 "| PRICE:",
                 round(price, 2),
+                "| SOURCE:",
+                price_source,
                 "| SIGNAL:",
                 current_signal,
                 "| REASON:",
@@ -313,14 +446,21 @@ while True:
                 flush=True
             )
 
-            last_heartbeat = time.time()
+            last_heartbeat = (
+                time.time()
+            )
 
-        time.sleep(PRICE_INTERVAL)
+        time.sleep(
+            PRICE_INTERVAL
+        )
 
     except KeyboardInterrupt:
 
         print()
-        print("BOT STOPPED")
+        print(
+            "BOT STOPPED"
+        )
+
         break
 
     except Exception as error:
