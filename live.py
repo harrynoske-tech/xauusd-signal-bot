@@ -439,6 +439,31 @@ def format_signal_message(
     return message
 
 
+def get_telegram_updates(offset=None):
+
+    url = (
+        "https://api.telegram.org/bot"
+        + TELEGRAM_TOKEN
+        + "/getUpdates"
+    )
+
+    params = {
+        "timeout": 1
+    }
+
+    if offset is not None:
+        params["offset"] = offset
+
+    response = requests.get(
+        url,
+        params=params,
+        timeout=5
+    )
+
+    response.raise_for_status()
+
+    return response.json()["result"]
+
 print()
 print("=" * 60)
 print("LIVE XAUUSD SIGNAL BOT")
