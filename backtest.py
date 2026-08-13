@@ -5,13 +5,21 @@ from strategy import generate_signal
 
 
 # ============================================================
-# CONFIG
+# CONFIGURATION
 # ============================================================
 
 PERIOD = "60d"
 INTERVAL = "15m"
 
-STARTING_BALANCE = 1000.0
+# Check every 2 x 15-minute candles = every 30 minutes.
+CHECK_EVERY = 2
+
+# Keep enough recent candles for structure calculations.
+MAX_15M_CANDLES = 1000
+MAX_DAILY_CANDLES = 500
+
+MINIMUM_15M_CANDLES = 300
+MINIMUM_DAILY_CANDLES = 100
 
 
 # ============================================================
@@ -24,9 +32,7 @@ print("XAUUSD STRATEGY BACKTEST")
 print("=" * 60)
 print()
 
-print(
-    "Loading XAUUSD historical data..."
-)
+print("Loading XAUUSD historical data...", flush=True)
 
 gold = yf.Ticker("GC=F")
 
@@ -41,67 +47,56 @@ data_daily = gold.history(
 )
 
 if data_15m.empty:
-
     raise RuntimeError(
         "No 15m historical data received."
     )
 
 if data_daily.empty:
-
     raise RuntimeError(
         "No daily historical data received."
     )
 
 
+# ============================================================
+# REMOVE TIMEZONE
+# ============================================================
+
+data_15m = data_15m.copy()
+data_daily = data_daily.copy()
+
+if data_15m.index.tz is not None:
+    data_15m.index = (
+        data_15m.index.tz_convert(None)
+    )
+
+if data_daily.index.tz is not None:
+    data_daily.index = (
+        data_daily.index.tz_convert(None)
+    )
+
+
 print(
     "15m candles:",
-    len(data_15m)
+    len(data_15m),
+    flush=True
 )
 
 print(
     "Daily candles:",
-    len(data_daily)
+    len(data_daily),
+    flush=True
+)
+
+print(
+    "Checking every 30 minutes...",
+    flush=True
 )
 
 print()
 
 
 # ============================================================
-# PREPARE DATA
-# ============================================================
-
-data_15m = data_15m.copy()
-data_daily = data_daily.copy()
-
-# Remove timezone complications.
-if data_15m.index.tz is not None:
-
-    data_15m.index = (
-        data_15m.index
-        .tz_convert(None)
-    )
-
-if data_daily.index.tz is not None:
-
-    data_daily.index = (
-        data_daily.index
-        .tz_convert(None)
-    )
-
-
-# ============================================================
-# BACKTEST STATE
-# ============================================================
-
-signals = []
-
-current_trade = None
-
-processed_signal_keys = set()
-
-
-# ============================================================
-# HELPER
+# TRADE RESULT
 # ============================================================
 
 def check_trade_result(
@@ -117,13 +112,8 @@ def check_trade_result(
 
     for timestamp, candle in future_data.iterrows():
 
-        high = float(
-            candle["High"]
-        )
-
-        low = float(
-            candle["Low"]
-        )
+        high = float(candle["High"])
+        low = float(candle["Low"])
 
         # ----------------------------------------------------
         # SELL
@@ -132,15 +122,15 @@ def check_trade_result(
         if direction == "SELL":
 
             stop_hit = (
-                high
-                >= stop_loss
+                high >= stop_loss
             )
 
             target_hit = (
-                low
-                <= take_profit
+                low <= take_profit
             )
 
+            # If both are touched by the same candle,
+            # we cannot know which happened first.
             if stop_hit and target_hit:
 
                 return {
@@ -172,13 +162,11 @@ def check_trade_result(
         if direction == "BUY":
 
             stop_hit = (
-                low
-                <= stop_loss
+                low <= stop_loss
             )
 
             target_hit = (
-                high
-                >= take_profit
+                high >= take_profit
             )
 
             if stop_hit and target_hit:
@@ -213,42 +201,66 @@ def check_trade_result(
 
 
 # ============================================================
-# RUN STRATEGY THROUGH HISTORY
+# BACKTEST
 # ============================================================
 
-print(
-    "Running strategy through historical data..."
+signals = []
+
+last_signal_key = None
+
+evaluation_count = 0
+
+total_points = (
+    len(data_15m)
+    - MINIMUM_15M_CANDLES
 )
 
-# Start far enough into the dataset to give the strategy
-# enough candles to calculate structure.
+print(
+    "Starting historical simulation...",
+    flush=True
+)
 
-MINIMUM_CANDLES = 300
+print()
+
 
 for i in range(
-    MINIMUM_CANDLES,
-    len(data_15m)
+    MINIMUM_15M_CANDLES,
+    len(data_15m),
+    CHECK_EVERY
 ):
+
+    evaluation_count += 1
 
     timestamp = data_15m.index[i]
 
+    # --------------------------------------------------------
+    # Only use information that existed at this point.
+    # --------------------------------------------------------
+
     historical_15m = data_15m.iloc[
-        :i + 1
+        max(
+            0,
+            i - MAX_15M_CANDLES
+        ):
+        i + 1
     ].copy()
+
+    historical_daily = data_daily[
+        data_daily.index <= timestamp
+    ].tail(
+        MAX_DAILY_CANDLES
+    ).copy()
+
+    if len(historical_daily) < MINIMUM_DAILY_CANDLES:
+        continue
 
     current_price = float(
         historical_15m["Close"].iloc[-1]
     )
 
-    # Only use daily candles that existed at this point.
-    historical_daily = data_daily[
-        data_daily.index
-        <= timestamp
-    ].copy()
-
-    if len(historical_daily) < 100:
-
-        continue
+    # --------------------------------------------------------
+    # Run the actual strategy.
+    # --------------------------------------------------------
 
     try:
 
@@ -261,9 +273,11 @@ for i in range(
     except Exception as error:
 
         print(
-            "BACKTEST ERROR:",
+            "ERROR at",
             timestamp,
-            error
+            ":",
+            error,
+            flush=True
         )
 
         continue
@@ -272,6 +286,44 @@ for i in range(
         "signal",
         "NONE"
     )
+
+    # --------------------------------------------------------
+    # Progress indicator.
+    # --------------------------------------------------------
+
+    if evaluation_count % 100 == 0:
+
+        progress = (
+            evaluation_count
+            / max(
+                1,
+                total_points / CHECK_EVERY
+            )
+            * 100
+        )
+
+        print(
+            "Progress:",
+            round(
+                min(
+                    progress,
+                    100
+                ),
+                1
+            ),
+            "%",
+            "|",
+            "Checked:",
+            evaluation_count,
+            "|",
+            "Signals:",
+            len(signals),
+            flush=True
+        )
+
+    # --------------------------------------------------------
+    # Ignore NONE.
+    # --------------------------------------------------------
 
     if signal_type not in (
         "BUY",
@@ -301,11 +353,10 @@ for i in range(
         continue
 
     # --------------------------------------------------------
-    # Prevent duplicate signals from the same setup.
+    # Prevent duplicate alerts from the same setup.
     # --------------------------------------------------------
 
     signal_key = (
-        timestamp,
         signal_type,
         round(
             float(entry),
@@ -321,16 +372,13 @@ for i in range(
         )
     )
 
-    if signal_key in processed_signal_keys:
-
+    if signal_key == last_signal_key:
         continue
 
-    processed_signal_keys.add(
-        signal_key
-    )
+    last_signal_key = signal_key
 
     # --------------------------------------------------------
-    # Evaluate what happened after the signal.
+    # Test what happened after the signal.
     # --------------------------------------------------------
 
     future_data = data_15m.iloc[
@@ -394,9 +442,24 @@ for i in range(
         trade
     )
 
+    print(
+        "SIGNAL FOUND:",
+        timestamp,
+        "|",
+        signal_type,
+        "| Entry:",
+        round(
+            float(entry),
+            2
+        ),
+        "| Result:",
+        result["result"],
+        flush=True
+    )
+
 
 # ============================================================
-# RESULTS
+# SUMMARY
 # ============================================================
 
 print()
@@ -442,7 +505,7 @@ open_count = sum(
 
 
 # ============================================================
-# PERIOD
+# TEST PERIOD
 # ============================================================
 
 start_date = data_15m.index[0]
@@ -456,7 +519,6 @@ days_tested = (
 weeks_tested = (
     days_tested / 7
 )
-
 
 if weeks_tested > 0:
 
@@ -493,16 +555,52 @@ else:
 
 
 # ============================================================
+# LONGEST SIGNAL GAP
+# ============================================================
+
+if len(signals) >= 2:
+
+    signal_times = [
+        trade["time"]
+        for trade in signals
+    ]
+
+    gaps = []
+
+    for j in range(
+        1,
+        len(signal_times)
+    ):
+
+        gap = (
+            signal_times[j]
+            - signal_times[j - 1]
+        ).total_seconds() / 86400
+
+        gaps.append(
+            gap
+        )
+
+    longest_gap = max(
+        gaps
+    )
+
+else:
+
+    longest_gap = None
+
+
+# ============================================================
 # PRINT SUMMARY
 # ============================================================
 
 print(
-    "TEST PERIOD"
+    "TEST PERIOD:"
 )
 
 print(
     start_date,
-    "→",
+    "->",
     end_date
 )
 
@@ -591,43 +689,6 @@ print(
 
 print()
 
-
-# ============================================================
-# LONGEST GAP BETWEEN SIGNALS
-# ============================================================
-
-if len(signals) >= 2:
-
-    signal_times = [
-        trade["time"]
-        for trade in signals
-    ]
-
-    gaps = []
-
-    for j in range(
-        1,
-        len(signal_times)
-    ):
-
-        gap = (
-            signal_times[j]
-            - signal_times[j - 1]
-        ).total_seconds() / 86400
-
-        gaps.append(
-            gap
-        )
-
-    longest_gap = max(
-        gaps
-    )
-
-else:
-
-    longest_gap = None
-
-
 if longest_gap is not None:
 
     print(
@@ -645,7 +706,6 @@ else:
         "LONGEST GAP BETWEEN SIGNALS: N/A"
     )
 
-
 print()
 
 
@@ -655,17 +715,9 @@ print()
 
 if signals:
 
-    print(
-        "=" * 60
-    )
-
-    print(
-        "INDIVIDUAL SIGNALS"
-    )
-
-    print(
-        "=" * 60
-    )
+    print("=" * 60)
+    print("INDIVIDUAL SIGNALS")
+    print("=" * 60)
 
     for number, trade in enumerate(
         signals,
@@ -720,7 +772,7 @@ if signals:
         )
 
         print(
-            "Bias:",
+            "Overall Bias:",
             trade["overall_bias"]
         )
 
@@ -731,7 +783,6 @@ if signals:
                 trade["exit_time"]
             )
 
-
 else:
 
     print(
@@ -740,12 +791,6 @@ else:
 
 
 print()
-print(
-    "=" * 60
-)
-print(
-    "END OF BACKTEST"
-)
-print(
-    "=" * 60
-)
+print("=" * 60)
+print("END OF BACKTEST")
+print("=" * 60)
