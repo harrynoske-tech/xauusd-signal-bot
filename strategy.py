@@ -7,7 +7,7 @@ import pandas as pd
 
 PIP_SIZE = 0.1
 
-MIN_TOUCHES = 3
+MIN_TOUCHES = 2
 
 MIN_ZONE_PIPS = 5
 MAX_ZONE_PIPS = 300
@@ -20,6 +20,15 @@ AOI_TOLERANCE = 5.0
 SL_BUFFER = 5.0
 
 RISK_REWARD = 2.0
+
+# Maximum distance from current price for an AOI
+# to be considered relevant.
+MAX_RELEVANT_AOI_DISTANCE = 300.0
+
+# Number of recent candles used when counting
+# actual interactions with an AOI.
+RECENT_TOUCH_LOOKBACK_DAILY = 250
+RECENT_TOUCH_LOOKBACK_WEEKLY = 52
 
 
 # ============================================================
@@ -186,6 +195,7 @@ def resample_data(
     }
 
     if timeframe not in rules:
+
         raise ValueError(
             f"Unsupported timeframe: {timeframe}"
         )
@@ -252,16 +262,24 @@ def get_higher_timeframe_bias(
         bias_4h
     ]
 
-    bullish = biases.count("BULLISH")
-    bearish = biases.count("BEARISH")
+    bullish = biases.count(
+        "BULLISH"
+    )
+
+    bearish = biases.count(
+        "BEARISH"
+    )
 
     if bullish >= 2:
+
         overall = "BULLISH"
 
     elif bearish >= 2:
+
         overall = "BEARISH"
 
     else:
+
         overall = "NEUTRAL"
 
     return {
@@ -282,18 +300,28 @@ def get_valid_structure_range(
 
     points = []
 
-    for i in range(len(structure)):
+    for i in range(
+        len(structure)
+    ):
 
         row = structure.iloc[i]
 
-        if pd.isna(row["structure"]):
+        if pd.isna(
+            row["structure"]
+        ):
             continue
 
         points.append({
             "index": i,
-            "high": float(row["High"]),
-            "low": float(row["Low"]),
-            "structure": row["structure"]
+            "high": float(
+                row["High"]
+            ),
+            "low": float(
+                row["Low"]
+            ),
+            "structure": row[
+                "structure"
+            ]
         })
 
     if len(points) < 2:
@@ -351,13 +379,73 @@ def get_valid_structure_range(
 
 
 # ============================================================
+# COUNT ACTUAL AOI TOUCHES
+# ============================================================
+
+def count_zone_touches(
+    data: pd.DataFrame,
+    zone_low: float,
+    zone_high: float,
+    lookback: int
+):
+
+    if data.empty:
+        return 0
+
+    recent = data.tail(
+        lookback
+    )
+
+    touches = 0
+
+    currently_touching = False
+
+    for _, candle in recent.iterrows():
+
+        candle_high = float(
+            candle["High"]
+        )
+
+        candle_low = float(
+            candle["Low"]
+        )
+
+        candle_touches_zone = (
+            candle_high >= zone_low
+            and
+            candle_low <= zone_high
+        )
+
+        # Count a touch event only when price
+        # enters the zone from outside.
+        if candle_touches_zone:
+
+            if not currently_touching:
+
+                touches += 1
+
+            currently_touching = True
+
+        else:
+
+            currently_touching = False
+
+    return touches
+
+
+# ============================================================
 # AREA OF INTEREST
 # ============================================================
 
 def find_area_of_interest(
     data: pd.DataFrame,
-    swing_length: int = 3
+    current_price: float = None,
+    swing_length: int = 3,
+    touch_lookback: int = 100
 ):
+
+    if data.empty:
+        return []
 
     structure = find_market_structure(
         data,
@@ -378,9 +466,9 @@ def find_area_of_interest(
 
     zones = []
 
-    # --------------------------------------------------------
+    # ========================================================
     # SUPPORT
-    # --------------------------------------------------------
+    # ========================================================
 
     support_prices = [
         float(price)
@@ -396,17 +484,26 @@ def find_area_of_interest(
         nearby = [
             price
             for price in support_prices
-            if abs(price - anchor)
-            <= MAX_ZONE_WIDTH
+            if abs(
+                price - anchor
+            ) <= MAX_ZONE_WIDTH
         ]
 
         if len(nearby) < MIN_TOUCHES:
             continue
 
-        zone_low = min(nearby)
-        zone_high = max(nearby)
+        zone_low = min(
+            nearby
+        )
 
-        width = zone_high - zone_low
+        zone_high = max(
+            nearby
+        )
+
+        width = (
+            zone_high
+            - zone_low
+        )
 
         if width < MIN_ZONE_WIDTH:
             continue
@@ -422,20 +519,32 @@ def find_area_of_interest(
         if key in processed_support:
             continue
 
-        processed_support.add(key)
+        processed_support.add(
+            key
+        )
+
+        actual_touches = count_zone_touches(
+            data,
+            zone_low,
+            zone_high,
+            touch_lookback
+        )
+
+        if actual_touches < MIN_TOUCHES:
+            continue
 
         zones.append({
             "type": "support",
             "low": zone_low,
             "high": zone_high,
             "width": width,
-            "touches": len(nearby),
+            "touches": actual_touches,
             "structure_bias": bias
         })
 
-    # --------------------------------------------------------
+    # ========================================================
     # RESISTANCE
-    # --------------------------------------------------------
+    # ========================================================
 
     resistance_prices = [
         float(price)
@@ -451,17 +560,26 @@ def find_area_of_interest(
         nearby = [
             price
             for price in resistance_prices
-            if abs(price - anchor)
-            <= MAX_ZONE_WIDTH
+            if abs(
+                price - anchor
+            ) <= MAX_ZONE_WIDTH
         ]
 
         if len(nearby) < MIN_TOUCHES:
             continue
 
-        zone_low = min(nearby)
-        zone_high = max(nearby)
+        zone_low = min(
+            nearby
+        )
 
-        width = zone_high - zone_low
+        zone_high = max(
+            nearby
+        )
+
+        width = (
+            zone_high
+            - zone_low
+        )
 
         if width < MIN_ZONE_WIDTH:
             continue
@@ -477,20 +595,32 @@ def find_area_of_interest(
         if key in processed_resistance:
             continue
 
-        processed_resistance.add(key)
+        processed_resistance.add(
+            key
+        )
+
+        actual_touches = count_zone_touches(
+            data,
+            zone_low,
+            zone_high,
+            touch_lookback
+        )
+
+        if actual_touches < MIN_TOUCHES:
+            continue
 
         zones.append({
             "type": "resistance",
             "low": zone_low,
             "high": zone_high,
             "width": width,
-            "touches": len(nearby),
+            "touches": actual_touches,
             "structure_bias": bias
         })
 
-    # --------------------------------------------------------
+    # ========================================================
     # REMOVE OVERLAPPING DUPLICATES
-    # --------------------------------------------------------
+    # ========================================================
 
     zones.sort(
         key=lambda zone: (
@@ -526,7 +656,106 @@ def find_area_of_interest(
                 break
 
         if not duplicate:
-            cleaned.append(zone)
+
+            cleaned.append(
+                zone
+            )
+
+    # ========================================================
+    # CURRENT PRICE FILTER
+    # ========================================================
+
+    if current_price is not None:
+
+        relevant = []
+
+        current_price = float(
+            current_price
+        )
+
+        for zone in cleaned:
+
+            zone_low = float(
+                zone["low"]
+            )
+
+            zone_high = float(
+                zone["high"]
+            )
+
+            # Price currently inside the zone.
+            if (
+                zone_low
+                <= current_price
+                <= zone_high
+            ):
+
+                relevant.append(
+                    zone
+                )
+
+                continue
+
+            # Support should be below price.
+            if (
+                zone["type"] == "support"
+                and zone_high < current_price
+            ):
+
+                distance = (
+                    current_price
+                    - zone_high
+                )
+
+                if (
+                    distance
+                    <= MAX_RELEVANT_AOI_DISTANCE
+                ):
+
+                    relevant.append(
+                        zone
+                    )
+
+                continue
+
+            # Resistance should be above price.
+            if (
+                zone["type"] == "resistance"
+                and zone_low > current_price
+            ):
+
+                distance = (
+                    zone_low
+                    - current_price
+                )
+
+                if (
+                    distance
+                    <= MAX_RELEVANT_AOI_DISTANCE
+                ):
+
+                    relevant.append(
+                        zone
+                    )
+
+        cleaned = relevant
+
+        # Sort by distance from current price.
+        cleaned.sort(
+            key=lambda zone: (
+                min(
+                    abs(
+                        current_price
+                        - float(zone["low"])
+                    ),
+                    abs(
+                        current_price
+                        - float(zone["high"])
+                    )
+                ),
+                -zone["touches"]
+            )
+        )
 
     return cleaned
 
@@ -536,7 +765,8 @@ def find_area_of_interest(
 # ============================================================
 
 def get_weekly_daily_areas(
-    data_daily: pd.DataFrame
+    data_daily: pd.DataFrame,
+    current_price: float = None
 ):
 
     weekly_data = resample_data(
@@ -546,10 +776,15 @@ def get_weekly_daily_areas(
 
     return {
         "weekly": find_area_of_interest(
-            weekly_data
+            weekly_data,
+            current_price=current_price,
+            touch_lookback=RECENT_TOUCH_LOOKBACK_WEEKLY
         ),
+
         "daily": find_area_of_interest(
-            data_daily
+            data_daily,
+            current_price=current_price,
+            touch_lookback=RECENT_TOUCH_LOOKBACK_DAILY
         )
     }
 
@@ -744,7 +979,9 @@ def is_bullish_engulfing(
     previous_two = data.iloc[-3:-1]
     current = data.iloc[-1]
 
-    if not is_bullish(current):
+    if not is_bullish(
+        current
+    ):
         return False
 
     current_body_low = min(
@@ -759,7 +996,9 @@ def is_bullish_engulfing(
 
     for _, candle in previous_two.iterrows():
 
-        if not is_bearish(candle):
+        if not is_bearish(
+            candle
+        ):
             return False
 
         previous_body_low = min(
@@ -772,10 +1011,18 @@ def is_bullish_engulfing(
             float(candle["Close"])
         )
 
-        if current_body_low > previous_body_low:
+        if (
+            current_body_low
+            > previous_body_low
+        ):
+
             return False
 
-        if current_body_high < previous_body_high:
+        if (
+            current_body_high
+            < previous_body_high
+        ):
+
             return False
 
     return True
@@ -795,7 +1042,9 @@ def is_bearish_engulfing(
     previous_two = data.iloc[-3:-1]
     current = data.iloc[-1]
 
-    if not is_bearish(current):
+    if not is_bearish(
+        current
+    ):
         return False
 
     current_body_low = min(
@@ -810,7 +1059,9 @@ def is_bearish_engulfing(
 
     for _, candle in previous_two.iterrows():
 
-        if not is_bullish(candle):
+        if not is_bullish(
+            candle
+        ):
             return False
 
         previous_body_low = min(
@@ -823,10 +1074,18 @@ def is_bearish_engulfing(
             float(candle["Close"])
         )
 
-        if current_body_low > previous_body_low:
+        if (
+            current_body_low
+            > previous_body_low
+        ):
+
             return False
 
-        if current_body_high < previous_body_high:
+        if (
+            current_body_high
+            < previous_body_high
+        ):
+
             return False
 
     return True
@@ -838,8 +1097,13 @@ def is_bearish_engulfing(
 
 def is_hammer(row):
 
-    body = candle_body(row)
-    total_range = candle_range(row)
+    body = candle_body(
+        row
+    )
+
+    total_range = candle_range(
+        row
+    )
 
     if total_range <= 0:
         return False
@@ -875,8 +1139,13 @@ def is_hammer(row):
 
 def is_shooting_star(row):
 
-    body = candle_body(row)
-    total_range = candle_range(row)
+    body = candle_body(
+        row
+    )
+
+    total_range = candle_range(
+        row
+    )
 
     if total_range <= 0:
         return False
@@ -921,19 +1190,30 @@ def is_bullish_aoi_rejection(
     if aoi["type"] != "support":
         return False
 
-    if not is_bullish(row):
+    if not is_bullish(
+        row
+    ):
         return False
 
-    body = candle_body(row)
-    total_range = candle_range(row)
+    body = candle_body(
+        row
+    )
+
+    total_range = candle_range(
+        row
+    )
 
     if total_range <= 0:
         return False
 
-    close = float(row["Close"])
-    low = float(row["Low"])
+    close = float(
+        row["Close"]
+    )
 
-    # Candle must interact with the support area.
+    low = float(
+        row["Low"]
+    )
+
     touched_aoi = (
         low
         <= aoi["high"]
@@ -942,7 +1222,6 @@ def is_bullish_aoi_rejection(
     if not touched_aoi:
         return False
 
-    # Close must finish back above the AOI.
     closed_above = (
         close
         >= aoi["high"]
@@ -951,7 +1230,6 @@ def is_bullish_aoi_rejection(
     if not closed_above:
         return False
 
-    # Require a meaningful bullish candle.
     strong_body = (
         body / total_range
         >= 0.45
@@ -975,19 +1253,30 @@ def is_bearish_aoi_rejection(
     if aoi["type"] != "resistance":
         return False
 
-    if not is_bearish(row):
+    if not is_bearish(
+        row
+    ):
         return False
 
-    body = candle_body(row)
-    total_range = candle_range(row)
+    body = candle_body(
+        row
+    )
+
+    total_range = candle_range(
+        row
+    )
 
     if total_range <= 0:
         return False
 
-    high = float(row["High"])
-    close = float(row["Close"])
+    high = float(
+        row["High"]
+    )
 
-    # Candle must trade into / above the resistance area.
+    close = float(
+        row["Close"]
+    )
+
     touched_aoi = (
         high
         >= aoi["low"]
@@ -996,7 +1285,6 @@ def is_bearish_aoi_rejection(
     if not touched_aoi:
         return False
 
-    # Close must finish back below the AOI.
     closed_below = (
         close
         <= aoi["high"]
@@ -1005,7 +1293,6 @@ def is_bearish_aoi_rejection(
     if not closed_below:
         return False
 
-    # Require a meaningful bearish candle.
     strong_body = (
         body / total_range
         >= 0.45
@@ -1029,10 +1316,14 @@ def is_morning_star(
     second = data.iloc[-2]
     third = data.iloc[-1]
 
-    if not is_bearish(first):
+    if not is_bearish(
+        first
+    ):
         return False
 
-    if not is_bullish(third):
+    if not is_bullish(
+        third
+    ):
         return False
 
     if not (
@@ -1041,6 +1332,7 @@ def is_morning_star(
         candle_body(second)
         <= candle_range(second) * 0.35
     ):
+
         return False
 
     first_body_high = max(
@@ -1074,10 +1366,14 @@ def is_evening_star(
     second = data.iloc[-2]
     third = data.iloc[-1]
 
-    if not is_bullish(first):
+    if not is_bullish(
+        first
+    ):
         return False
 
-    if not is_bearish(third):
+    if not is_bearish(
+        third
+    ):
         return False
 
     if not (
@@ -1086,6 +1382,7 @@ def is_evening_star(
         candle_body(second)
         <= candle_range(second) * 0.35
     ):
+
         return False
 
     first_body_low = min(
@@ -1126,34 +1423,54 @@ def get_entry_confirmation(
         current,
         aoi
     ):
+
         return "SELL"
 
     if is_bullish_aoi_rejection(
         current,
         aoi
     ):
+
         return "BUY"
 
     # --------------------------------------------------------
     # STANDARD CANDLE PATTERNS
     # --------------------------------------------------------
 
-    if is_morning_star(data):
+    if is_morning_star(
+        data
+    ):
+
         return "BUY"
 
-    if is_bullish_engulfing(data):
+    if is_bullish_engulfing(
+        data
+    ):
+
         return "BUY"
 
-    if is_hammer(current):
+    if is_hammer(
+        current
+    ):
+
         return "BUY"
 
-    if is_evening_star(data):
+    if is_evening_star(
+        data
+    ):
+
         return "SELL"
 
-    if is_bearish_engulfing(data):
+    if is_bearish_engulfing(
+        data
+    ):
+
         return "SELL"
 
-    if is_shooting_star(current):
+    if is_shooting_star(
+        current
+    ):
+
         return "SELL"
 
     return "NONE"
@@ -1186,8 +1503,7 @@ def calculate_sl_tp(
 
         take_profit = (
             entry
-            -
-            (
+            - (
                 risk
                 * RISK_REWARD
             )
@@ -1210,8 +1526,7 @@ def calculate_sl_tp(
 
         take_profit = (
             entry
-            +
-            (
+            + (
                 risk
                 * RISK_REWARD
             )
@@ -1227,7 +1542,8 @@ def calculate_sl_tp(
         "take_profit": take_profit,
         "risk": risk,
         "reward": abs(
-            take_profit - entry
+            take_profit
+            - entry
         ),
         "risk_reward": RISK_REWARD
     }
@@ -1257,11 +1573,12 @@ def generate_signal(
     # --------------------------------------------------------
 
     areas = get_weekly_daily_areas(
-        data_daily
+        data_daily,
+        current_price=current_price
     )
 
     # --------------------------------------------------------
-    # CURRENT PRICE MUST BE AT AOI
+    # CURRENT PRICE AT AOI
     # --------------------------------------------------------
 
     current_aoi_matches = get_current_aoi(
@@ -1279,7 +1596,7 @@ def generate_signal(
         }
 
     # --------------------------------------------------------
-    # SELECT AOI THAT MATCHES THE OVERALL BIAS
+    # SELECT AOI THAT MATCHES OVERALL BIAS
     # --------------------------------------------------------
 
     valid_aoi = None
@@ -1290,7 +1607,8 @@ def generate_signal(
             (
                 zone
                 for zone in current_aoi_matches
-                if zone["type"] == "resistance"
+                if zone["type"]
+                == "resistance"
             ),
             None
         )
@@ -1301,7 +1619,8 @@ def generate_signal(
             (
                 zone
                 for zone in current_aoi_matches
-                if zone["type"] == "support"
+                if zone["type"]
+                == "support"
             ),
             None
         )
@@ -1329,9 +1648,11 @@ def generate_signal(
     # --------------------------------------------------------
 
     if (
-        bias["overall"] == "BEARISH"
+        bias["overall"]
+        == "BEARISH"
         and
-        confirmation == "SELL"
+        confirmation
+        == "SELL"
     ):
 
         trade_levels = calculate_sl_tp(
@@ -1355,9 +1676,11 @@ def generate_signal(
     # --------------------------------------------------------
 
     if (
-        bias["overall"] == "BULLISH"
+        bias["overall"]
+        == "BULLISH"
         and
-        confirmation == "BUY"
+        confirmation
+        == "BUY"
     ):
 
         trade_levels = calculate_sl_tp(
