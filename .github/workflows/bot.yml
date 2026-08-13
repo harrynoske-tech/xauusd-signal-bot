@@ -2,8 +2,13 @@ name: XAUUSD Signal Bot
 
 on:
   workflow_dispatch:
+
   schedule:
     - cron: "0 */5 * * *"
+
+concurrency:
+  group: xauusd-signal-bot
+  cancel-in-progress: true
 
 jobs:
   run-bot:
