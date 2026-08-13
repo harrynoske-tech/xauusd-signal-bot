@@ -6,7 +6,10 @@ import pandas as pd
 import requests
 import yfinance as yf
 
-from strategy import generate_signal
+from strategy import (
+    generate_signal,
+    get_weekly_daily_areas,
+)
 
 
 PRIMARY_PRICE_URL = "https://api.gold-api.com/price/XAU"
@@ -18,54 +21,135 @@ PRICE_INTERVAL = 1
 DATA_REFRESH_INTERVAL = 60
 HEARTBEAT_INTERVAL = 30
 
-# How close price must be to an AOI before a WATCH alert is sent.
+# Maximum acceptable difference between the fallback
+# price and the last trusted Gold API price.
+MAX_PRICE_DISCREPANCY = 5.0
+
+# Price distance from an AOI required for an early warning.
 AOI_APPROACH_DISTANCE = 5.0
 
 
-def get_live_price():
-    try:
-        response = requests.get(
-            PRIMARY_PRICE_URL,
-            timeout=10
+def get_gold_api_price():
+
+    response = requests.get(
+        PRIMARY_PRICE_URL,
+        timeout=10
+    )
+
+    response.raise_for_status()
+
+    return float(
+        response.json()["price"]
+    )
+
+
+def get_yahoo_price():
+
+    gold = yf.Ticker("GC=F")
+
+    data = gold.history(
+        period="1d",
+        interval="1m"
+    )
+
+    if data.empty:
+        raise RuntimeError(
+            "Yahoo Finance returned no price data."
         )
-        response.raise_for_status()
 
-        return float(response.json()["price"]), "Gold API"
+    return float(
+        data["Close"].iloc[-1]
+    )
 
-    except Exception as primary_error:
+
+def get_live_price(last_trusted_price):
+
+    # -------------------------------------------------
+    # PRIMARY PRICE SOURCE
+    # -------------------------------------------------
+
+    try:
+
+        price = get_gold_api_price()
+
+        return {
+            "price": price,
+            "source": "Gold API",
+            "trusted": True,
+        }
+
+    except Exception as error:
+
         print(
             "PRIMARY PRICE ERROR:",
-            primary_error,
+            error,
             flush=True
         )
 
+    # -------------------------------------------------
+    # FALLBACK PRICE SOURCE
+    # -------------------------------------------------
+
     try:
-        gold = yf.Ticker("GC=F")
 
-        fallback_data = gold.history(
-            period="1d",
-            interval="1m"
-        )
+        fallback_price = get_yahoo_price()
 
-        if fallback_data.empty:
-            raise RuntimeError(
-                "Fallback returned no data."
+        # If we have a previously trusted Gold API price,
+        # make sure Yahoo is reasonably close to it.
+        if last_trusted_price is not None:
+
+            difference = abs(
+                fallback_price
+                - last_trusted_price
             )
 
-        price = float(
-            fallback_data["Close"].iloc[-1]
+            if difference > MAX_PRICE_DISCREPANCY:
+
+                print(
+                    "UNSAFE FALLBACK PRICE:",
+                    round(fallback_price, 2),
+                    "| LAST TRUSTED:",
+                    round(last_trusted_price, 2),
+                    "| DIFFERENCE:",
+                    round(difference, 2),
+                    flush=True
+                )
+
+                return {
+                    "price": last_trusted_price,
+                    "source": "LAST TRUSTED PRICE",
+                    "trusted": False,
+                }
+
+        return {
+            "price": fallback_price,
+            "source": "Yahoo Finance",
+            "trusted": False,
+        }
+
+    except Exception as error:
+
+        print(
+            "FALLBACK PRICE ERROR:",
+            error,
+            flush=True
         )
 
-        return price, "Yahoo Finance"
+        if last_trusted_price is not None:
 
-    except Exception as fallback_error:
+            return {
+                "price": last_trusted_price,
+                "source": "LAST TRUSTED PRICE",
+                "trusted": False,
+            }
+
         raise RuntimeError(
-            "ALL PRICE SOURCES FAILED. "
-            + str(fallback_error)
+            "ALL PRICE SOURCES FAILED."
         )
 
 
 def send_telegram(message):
+
     url = (
         "https://api.telegram.org/bot"
         + TELEGRAM_TOKEN
@@ -76,7 +160,7 @@ def send_telegram(message):
         url,
         json={
             "chat_id": TELEGRAM_CHAT_ID,
-            "text": message
+            "text": message,
         },
         timeout=10
     )
@@ -85,6 +169,7 @@ def send_telegram(message):
 
 
 def get_market_data():
+
     gold = yf.Ticker("GC=F")
 
     data_daily = gold.history(
@@ -98,6 +183,7 @@ def get_market_data():
     )
 
     if data_daily.empty or data_15m.empty:
+
         raise RuntimeError(
             "No historical market data received."
         )
@@ -106,6 +192,7 @@ def get_market_data():
 
 
 def get_current_15m_timestamp(index):
+
     now = pd.Timestamp.now(
         tz=index.tz
     )
@@ -113,7 +200,11 @@ def get_current_15m_timestamp(index):
     return now.floor("15min")
 
 
-def update_live_candle(data_15m, price):
+def update_live_candle(
+    data_15m,
+    price
+):
+
     data_15m = data_15m.copy()
 
     timestamp = get_current_15m_timestamp(
@@ -176,25 +267,22 @@ def update_live_candle(data_15m, price):
     return data_15m
 
 
-def find_approaching_aoi(signal, price):
-    """
-    Looks at the AOIs already identified by the strategy.
+def find_approaching_aoi(
+    data_daily,
+    bias,
+    price
+):
 
-    Only produces a WATCH alert when:
-    - overall bias is BEARISH and price is approaching resistance
-    - overall bias is BULLISH and price is approaching support
-    """
+    areas = get_weekly_daily_areas(
+        data_daily
+    )
 
-    bias = signal["bias"]["overall"]
-    aois = signal.get("aoi")
-
-    if not aois:
+    if not areas:
         return None
 
-    if isinstance(aois, dict):
-        aois = [aois]
+    overall_bias = bias["overall"]
 
-    for zone in aois:
+    for zone in areas:
 
         zone_type = zone.get("type")
 
@@ -207,44 +295,60 @@ def find_approaching_aoi(signal, price):
         low = float(low)
         high = float(high)
 
-        # Bearish setup: approaching resistance from below.
+        # -------------------------------------------------
+        # BEARISH -> APPROACHING RESISTANCE
+        # -------------------------------------------------
+
         if (
-            bias == "BEARISH"
+            overall_bias == "BEARISH"
             and zone_type == "resistance"
             and price < low
-            and low - price <= AOI_APPROACH_DISTANCE
         ):
 
-            return {
-                "direction": "SELL",
-                "zone": zone,
-                "distance": low - price
-            }
+            distance = low - price
 
-        # Bullish setup: approaching support from above.
+            if distance <= AOI_APPROACH_DISTANCE:
+
+                return {
+                    "direction": "SELL",
+                    "zone": zone,
+                    "distance": distance,
+                }
+
+        # -------------------------------------------------
+        # BULLISH -> APPROACHING SUPPORT
+        # -------------------------------------------------
+
         if (
-            bias == "BULLISH"
+            overall_bias == "BULLISH"
             and zone_type == "support"
             and price > high
-            and price - high <= AOI_APPROACH_DISTANCE
         ):
 
-            return {
-                "direction": "BUY",
-                "zone": zone,
-                "distance": price - high
-            }
+            distance = price - high
+
+            if distance <= AOI_APPROACH_DISTANCE:
+
+                return {
+                    "direction": "BUY",
+                    "zone": zone,
+                    "distance": distance,
+                }
 
     return None
 
 
-def format_watch_message(watch, price, signal):
+def format_watch_message(
+    watch,
+    price,
+    bias
+):
 
     direction = watch["direction"]
     zone = watch["zone"]
     distance = watch["distance"]
 
-    message = (
+    return (
         "XAUUSD APPROACHING SETUP\n\n"
         "Direction: "
         + direction
@@ -253,24 +357,26 @@ def format_watch_message(watch, price, signal):
         + str(round(price, 2))
         + "\n"
         "Bias: "
-        + signal["bias"]["overall"]
+        + bias["overall"]
         + "\n"
         "AOI: "
         + str(zone["low"])
         + " - "
         + str(zone["high"])
         + "\n"
-        "Distance to AOI: "
+        "Distance: "
         + str(round(distance, 2))
         + "\n\n"
-        "This is an EARLY WARNING only. "
-        "No trade signal has been confirmed."
+        "EARLY WARNING ONLY"
+        "\n"
+        "Confirmation is still required."
     )
 
-    return message
 
-
-def format_signal_message(signal, price):
+def format_signal_message(
+    signal,
+    price
+):
 
     message = (
         "XAUUSD SIGNAL\n\n"
@@ -288,12 +394,14 @@ def format_signal_message(signal, price):
     )
 
     if signal.get("aoi"):
+
         message += (
             "\n\nAOI: "
             + str(signal["aoi"])
         )
 
     if signal.get("entry") is not None:
+
         message += (
             "\n\nEntry: "
             + str(
@@ -305,6 +413,7 @@ def format_signal_message(signal, price):
         )
 
     if signal.get("stop_loss") is not None:
+
         message += (
             "\nStop Loss: "
             + str(
@@ -316,6 +425,7 @@ def format_signal_message(signal, price):
         )
 
     if signal.get("take_profit") is not None:
+
         message += (
             "\nTake Profit: "
             + str(
@@ -335,7 +445,9 @@ print("LIVE XAUUSD SIGNAL BOT")
 print("=" * 60)
 print()
 
-print("Loading historical market data...")
+print(
+    "Loading historical market data..."
+)
 
 data_15m, data_daily = get_market_data()
 
@@ -351,6 +463,12 @@ print()
 print("Live price: EVERY 1 SECOND")
 print("Historical refresh: EVERY 60 SECONDS")
 print("Telegram alerts: ENABLED")
+print("Primary price source: Gold API")
+print("Fallback price source: Yahoo Finance")
+print(
+    "Maximum fallback discrepancy:",
+    MAX_PRICE_DISCREPANCY
+)
 print(
     "AOI approach distance:",
     AOI_APPROACH_DISTANCE
@@ -362,12 +480,18 @@ print()
 last_data_refresh = time.time()
 last_heartbeat = time.time()
 
+last_trusted_price = None
+
 last_signal_alert = None
 last_watch_alert = None
 
 while True:
 
     try:
+
+        # -------------------------------------------------
+        # REFRESH HISTORICAL DATA
+        # -------------------------------------------------
 
         if (
             time.time()
@@ -394,12 +518,34 @@ while True:
                 "daily candles"
             )
 
-        price, price_source = get_live_price()
+        # -------------------------------------------------
+        # LIVE PRICE
+        # -------------------------------------------------
+
+        price_data = get_live_price(
+            last_trusted_price
+        )
+
+        price = price_data["price"]
+        price_source = price_data["source"]
+        price_trusted = price_data["trusted"]
+
+        if price_trusted:
+
+            last_trusted_price = price
+
+        # -------------------------------------------------
+        # UPDATE LIVE CANDLE
+        # -------------------------------------------------
 
         data_15m = update_live_candle(
             data_15m,
             price
         )
+
+        # -------------------------------------------------
+        # RUN STRATEGY
+        # -------------------------------------------------
 
         signal = generate_signal(
             data_15m,
@@ -410,12 +556,16 @@ while True:
         current_signal = signal["signal"]
 
         # -------------------------------------------------
-        # REAL BUY / SELL SIGNAL
+        # ONLY ALLOW TRADING SIGNALS FROM A TRUSTED
+        # LIVE PRICE
         # -------------------------------------------------
 
-        if current_signal in (
-            "BUY",
-            "SELL"
+        if (
+            current_signal in (
+                "BUY",
+                "SELL"
+            )
+            and price_trusted
         ):
 
             entry = signal.get("entry")
@@ -464,18 +614,17 @@ while True:
 
                 last_signal_alert = alert_key
 
-                # Reset the watch alert so a future setup
-                # can generate a new warning.
                 last_watch_alert = None
 
         # -------------------------------------------------
-        # APPROACHING BUY / SELL WATCH
+        # APPROACHING AOI
         # -------------------------------------------------
 
-        else:
+        elif price_trusted:
 
             watch = find_approaching_aoi(
-                signal,
+                data_daily,
+                signal["bias"],
                 price
             )
 
@@ -499,7 +648,7 @@ while True:
                         format_watch_message(
                             watch,
                             price,
-                            signal
+                            signal["bias"]
                         )
                     )
 
@@ -514,8 +663,6 @@ while True:
 
             else:
 
-                # Once price moves away from the AOI,
-                # allow a future approach alert.
                 last_watch_alert = None
 
         # -------------------------------------------------
@@ -537,6 +684,8 @@ while True:
                 round(price, 2),
                 "| SOURCE:",
                 price_source,
+                "| TRUSTED:",
+                price_trusted,
                 "| SIGNAL:",
                 current_signal,
                 "| REASON:",
