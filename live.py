@@ -464,6 +464,136 @@ def get_telegram_updates(offset=None):
 
     return response.json()["result"]
 
+def send_report(
+    price,
+    price_source,
+    price_trusted,
+    signal,
+    data_daily,
+    last_data_refresh,
+    last_heartbeat
+):
+
+    bias = signal["bias"]
+
+    areas = get_weekly_daily_areas(
+        data_daily
+    )
+
+    report = (
+        "XAUUSD MARKET REPORT\n\n"
+        "PRICE\n"
+        "Current: "
+        + str(round(price, 2))
+        + "\n"
+        "Source: "
+        + price_source
+        + "\n"
+        "Trusted: "
+        + ("YES" if price_trusted else "NO")
+        + "\n\n"
+        "BIAS\n"
+        "Weekly: "
+        + bias["weekly"]
+        + "\n"
+        "Daily: "
+        + bias["daily"]
+        + "\n"
+        "4H: "
+        + bias["4h"]
+        + "\n"
+        "Overall: "
+        + bias["overall"]
+        + "\n\n"
+        "SIGNAL\n"
+        "Status: "
+        + signal["signal"]
+        + "\n"
+        "Reason: "
+        + signal["reason"]
+    )
+
+    if areas:
+
+        report += "\n\nAOIs\n"
+
+        for zone in areas[:5]:
+
+            report += (
+                "\n"
+                + zone["type"].upper()
+                + ": "
+                + str(zone["low"])
+                + " - "
+                + str(zone["high"])
+                + "\nTouches: "
+                + str(zone.get("touches", "N/A"))
+                + "\nBias: "
+                + str(
+                    zone.get(
+                        "structure_bias",
+                        "N/A"
+                    )
+                )
+            )
+
+    if signal.get("entry") is not None:
+
+        report += (
+            "\n\nTRADE LEVELS\n"
+            "Entry: "
+            + str(
+                round(
+                    signal["entry"],
+                    2
+                )
+            )
+        )
+
+    if signal.get("stop_loss") is not None:
+
+        report += (
+            "\nStop Loss: "
+            + str(
+                round(
+                    signal["stop_loss"],
+                    2
+                )
+            )
+        )
+
+    if signal.get("take_profit") is not None:
+
+        report += (
+            "\nTake Profit: "
+            + str(
+                round(
+                    signal["take_profit"],
+                    2
+                )
+            )
+        )
+
+    report += (
+        "\n\nBOT STATUS\n"
+        "Status: ONLINE\n"
+        "Last data refresh: "
+        + datetime.fromtimestamp(
+            last_data_refresh
+        ).strftime(
+            "%H:%M:%S"
+        )
+        + "\n"
+        "Last heartbeat: "
+        + datetime.fromtimestamp(
+            last_heartbeat
+        ).strftime(
+            "%H:%M:%S"
+        )
+    )
+
+    send_telegram(report)
+
 print()
 print("=" * 60)
 print("LIVE XAUUSD SIGNAL BOT")
@@ -510,9 +640,59 @@ last_trusted_price = None
 last_signal_alert = None
 last_watch_alert = None
 
+last_price = None
+last_price_source = "NONE"
+last_price_trusted = False
+last_signal = {
+    "signal": "NONE",
+    "reason": "BOT_STARTING",
+    "bias": {
+        "weekly": "UNKNOWN",
+        "daily": "UNKNOWN",
+        "4h": "UNKNOWN",
+        "overall": "UNKNOWN"
+    },
+    "aoi": None
+}
+
 while True:
 
     try:
+
+                updates = get_telegram_updates()
+
+        for update in updates:
+
+            message = update.get(
+                "message"
+            )
+
+            if not message:
+                continue
+
+            chat_id = str(
+                message["chat"]["id"]
+            )
+
+            if chat_id != TELEGRAM_CHAT_ID:
+                continue
+
+            text = message.get(
+                "text",
+                ""
+            ).strip()
+
+            if text == "/report":
+
+                send_report(
+                    price,
+                    price_source,
+                    price_trusted,
+                    signal,
+                    data_daily,
+                    last_data_refresh,
+                    last_heartbeat
+                )
 
         # -------------------------------------------------
         # REFRESH HISTORICAL DATA
