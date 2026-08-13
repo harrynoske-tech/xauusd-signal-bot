@@ -1,17 +1,10 @@
-name: XAUUSD Signal Bot
+name: XAUUSD Strategy Backtest
 
 on:
   workflow_dispatch:
 
-  schedule:
-    - cron: "0 */5 * * *"
-
-concurrency:
-  group: xauusd-signal-bot
-  cancel-in-progress: true
-
 jobs:
-  run-bot:
+  run-backtest:
     runs-on: ubuntu-latest
     timeout-minutes: 350
 
@@ -28,8 +21,6 @@ jobs:
         run: |
           pip install requests pandas yfinance curl_cffi
 
-      - name: Run bot
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      - name: Run backtest
         run: |
-          python live.py
+          python backtest.py
