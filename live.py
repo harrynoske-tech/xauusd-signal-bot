@@ -34,6 +34,7 @@ AOI_APPROACH_DISTANCE = 5.0
 # ============================================================
 
 def get_gold_api_price():
+
     response = requests.get(
         PRIMARY_PRICE_URL,
         timeout=10
@@ -47,6 +48,7 @@ def get_gold_api_price():
 
 
 def get_yahoo_price():
+
     gold = yf.Ticker("GC=F")
 
     data = gold.history(
@@ -55,6 +57,7 @@ def get_yahoo_price():
     )
 
     if data.empty:
+
         raise RuntimeError(
             "Yahoo Finance returned no price data."
         )
@@ -67,6 +70,7 @@ def get_yahoo_price():
 def get_live_price(last_trusted_price):
 
     try:
+
         price = get_gold_api_price()
 
         return {
@@ -84,6 +88,7 @@ def get_live_price(last_trusted_price):
         )
 
     try:
+
         fallback_price = get_yahoo_price()
 
         if last_trusted_price is not None:
@@ -175,6 +180,7 @@ def get_telegram_updates(offset=None):
     }
 
     if offset is not None:
+
         params["offset"] = offset
 
     response = requests.get(
@@ -192,7 +198,7 @@ def get_telegram_updates(offset=None):
 
 
 # ============================================================
-# HISTORICAL DATA
+# MARKET DATA
 # ============================================================
 
 def get_market_data():
@@ -210,11 +216,13 @@ def get_market_data():
     )
 
     if data_daily.empty:
+
         raise RuntimeError(
             "No daily market data received."
         )
 
     if data_15m.empty:
+
         raise RuntimeError(
             "No 15m market data received."
         )
@@ -304,22 +312,23 @@ def update_live_candle(
 
 # ============================================================
 # AOI HELPERS
-#
-# strategy.py returns:
-#
-# {
-#     "weekly": [...],
-#     "daily": [...]
-# }
 # ============================================================
 
-def get_all_aois(data_daily):
+def get_all_aois(
+    data_daily,
+    current_price
+):
 
     areas = get_weekly_daily_areas(
-        data_daily
+        data_daily,
+        current_price=current_price
     )
 
-    if not isinstance(areas, dict):
+    if not isinstance(
+        areas,
+        dict
+    ):
+
         return []
 
     all_areas = []
@@ -334,23 +343,84 @@ def get_all_aois(data_daily):
             []
         )
 
-        if not isinstance(zones, list):
+        if not isinstance(
+            zones,
+            list
+        ):
+
             continue
 
         for zone in zones:
 
-            if not isinstance(zone, dict):
+            if not isinstance(
+                zone,
+                dict
+            ):
+
                 continue
 
-            zone_copy = dict(zone)
+            zone_copy = dict(
+                zone
+            )
 
             zone_copy["timeframe"] = (
                 timeframe
             )
 
+            # Calculate distance from current price.
+            low = zone_copy.get("low")
+            high = zone_copy.get("high")
+
+            if (
+                low is not None
+                and high is not None
+            ):
+
+                low = float(low)
+                high = float(high)
+
+                if (
+                    low
+                    <= current_price
+                    <= high
+                ):
+
+                    distance = 0.0
+
+                elif current_price < low:
+
+                    distance = (
+                        low
+                        - current_price
+                    )
+
+                else:
+
+                    distance = (
+                        current_price
+                        - high
+                    )
+
+                zone_copy["distance"] = (
+                    distance
+                )
+
             all_areas.append(
                 zone_copy
             )
+
+    all_areas.sort(
+        key=lambda zone: (
+            zone.get(
+                "distance",
+                float("inf")
+            ),
+            -zone.get(
+                "touches",
+                0
+            )
+        )
+    )
 
     return all_areas
 
@@ -362,7 +432,8 @@ def find_approaching_aoi(
 ):
 
     areas = get_all_aois(
-        data_daily
+        data_daily,
+        price
     )
 
     overall_bias = bias.get(
@@ -376,25 +447,43 @@ def find_approaching_aoi(
             "type"
         )
 
-        low = zone.get("low")
-        high = zone.get("high")
+        low = zone.get(
+            "low"
+        )
 
-        if low is None or high is None:
+        high = zone.get(
+            "high"
+        )
+
+        if (
+            low is None
+            or high is None
+        ):
+
             continue
 
         low = float(low)
         high = float(high)
 
-        # BEARISH -> approaching resistance
+        # ----------------------------------------------------
+        # BEARISH -> RESISTANCE ABOVE PRICE
+        # ----------------------------------------------------
+
         if (
             overall_bias == "BEARISH"
             and zone_type == "resistance"
             and price < low
         ):
 
-            distance = low - price
+            distance = (
+                low
+                - price
+            )
 
-            if distance <= AOI_APPROACH_DISTANCE:
+            if (
+                distance
+                <= AOI_APPROACH_DISTANCE
+            ):
 
                 return {
                     "direction": "SELL",
@@ -402,16 +491,25 @@ def find_approaching_aoi(
                     "distance": distance
                 }
 
-        # BULLISH -> approaching support
+        # ----------------------------------------------------
+        # BULLISH -> SUPPORT BELOW PRICE
+        # ----------------------------------------------------
+
         if (
             overall_bias == "BULLISH"
             and zone_type == "support"
             and price > high
         ):
 
-            distance = price - high
+            distance = (
+                price
+                - high
+            )
 
-            if distance <= AOI_APPROACH_DISTANCE:
+            if (
+                distance
+                <= AOI_APPROACH_DISTANCE
+            ):
 
                 return {
                     "direction": "BUY",
@@ -423,7 +521,7 @@ def find_approaching_aoi(
 
 
 # ============================================================
-# TELEGRAM MESSAGES
+# TELEGRAM MESSAGE FORMATTING
 # ============================================================
 
 def format_watch_message(
@@ -446,9 +544,11 @@ def format_watch_message(
         + "\n"
 
         "Bias: "
-        + bias.get(
-            "overall",
-            "UNKNOWN"
+        + str(
+            bias.get(
+                "overall",
+                "UNKNOWN"
+            )
         )
         + "\n"
 
@@ -471,9 +571,13 @@ def format_watch_message(
         + "\n"
 
         "AOI: "
-        + str(zone.get("low"))
+        + str(
+            zone.get("low")
+        )
         + " - "
-        + str(zone.get("high"))
+        + str(
+            zone.get("high")
+        )
         + "\n"
 
         "Distance: "
@@ -495,51 +599,97 @@ def format_signal_message(
     price
 ):
 
+    bias = signal.get(
+        "bias",
+        {}
+    )
+
     message = (
         "XAUUSD SIGNAL\n\n"
 
         "Signal: "
-        + signal["signal"]
+        + str(
+            signal.get(
+                "signal",
+                "UNKNOWN"
+            )
+        )
         + "\n"
 
         "Price: "
-        + str(round(price, 2))
+        + str(
+            round(price, 2)
+        )
         + "\n"
 
         "Reason: "
-        + signal["reason"]
+        + str(
+            signal.get(
+                "reason",
+                "UNKNOWN"
+            )
+        )
         + "\n"
 
         "Weekly Bias: "
-        + signal["bias"]["weekly"]
+        + str(
+            bias.get(
+                "weekly",
+                "UNKNOWN"
+            )
+        )
         + "\n"
 
         "Daily Bias: "
-        + signal["bias"]["daily"]
+        + str(
+            bias.get(
+                "daily",
+                "UNKNOWN"
+            )
+        )
         + "\n"
 
         "4H Bias: "
-        + signal["bias"]["4h"]
+        + str(
+            bias.get(
+                "4h",
+                "UNKNOWN"
+            )
+        )
         + "\n"
 
         "Overall Bias: "
-        + signal["bias"]["overall"]
+        + str(
+            bias.get(
+                "overall",
+                "UNKNOWN"
+            )
+        )
     )
 
-    if signal.get("aoi"):
+    aoi = signal.get(
+        "aoi"
+    )
 
-        aoi = signal["aoi"]
+    if isinstance(
+        aoi,
+        dict
+    ):
 
-        if isinstance(aoi, dict):
-
-            message += (
-                "\n\nAOI: "
-                + str(aoi.get("low"))
-                + " - "
-                + str(aoi.get("high"))
+        message += (
+            "\n\nAOI: "
+            + str(
+                aoi.get("low")
             )
+            + " - "
+            + str(
+                aoi.get("high")
+            )
+        )
 
-    if signal.get("entry") is not None:
+    if signal.get(
+        "entry"
+    ) is not None:
 
         message += (
             "\n\nEntry: "
@@ -551,7 +701,9 @@ def format_signal_message(
             )
         )
 
-    if signal.get("stop_loss") is not None:
+    if signal.get(
+        "stop_loss"
+    ) is not None:
 
         message += (
             "\nStop Loss: "
@@ -563,7 +715,9 @@ def format_signal_message(
             )
         )
 
-    if signal.get("take_profit") is not None:
+    if signal.get(
+        "take_profit"
+    ) is not None:
 
         message += (
             "\nTake Profit: "
@@ -579,7 +733,7 @@ def format_signal_message(
 
 
 # ============================================================
-# /REPORT
+# REPORT
 # ============================================================
 
 def send_report(
@@ -597,8 +751,11 @@ def send_report(
         {}
     )
 
+    # IMPORTANT:
+    # Pass the CURRENT PRICE into the AOI engine.
     areas = get_all_aois(
-        data_daily
+        data_daily,
+        price
     )
 
     report = (
@@ -606,7 +763,9 @@ def send_report(
 
         "PRICE\n"
         "Current: "
-        + str(round(price, 2))
+        + str(
+            round(price, 2)
+        )
         + "\n"
 
         "Source: "
@@ -681,53 +840,87 @@ def send_report(
         )
     )
 
-    # --------------------------------------------------------
-    # AOIs
-    # --------------------------------------------------------
+    # ========================================================
+    # NEAREST AOIs
+    # ========================================================
 
     if areas:
 
-        report += "\n\nAOIs"
+        report += (
+            "\n\nNEAREST RELEVANT AOIs"
+        )
 
-        for zone in areas:
+        # Only show the closest 6.
+        for zone in areas[:6]:
+
+            zone_type = str(
+                zone.get(
+                    "type",
+                    "UNKNOWN"
+                )
+            ).upper()
+
+            timeframe = str(
+                zone.get(
+                    "timeframe",
+                    "UNKNOWN"
+                )
+            ).upper()
+
+            low = zone.get(
+                "low",
+                "?"
+            )
+
+            high = zone.get(
+                "high",
+                "?"
+            )
+
+            touches = zone.get(
+                "touches",
+                "N/A"
+            )
+
+            distance = zone.get(
+                "distance"
+            )
+
+            if distance is None:
+
+                distance_text = "N/A"
+
+            else:
+
+                distance_text = str(
+                    round(
+                        float(distance),
+                        2
+                    )
+                )
 
             report += (
                 "\n\n"
-                + str(
-                    zone.get(
-                        "timeframe",
-                        "UNKNOWN"
-                    )
-                ).upper()
+                + timeframe
                 + " "
-                + str(
-                    zone.get(
-                        "type",
-                        "UNKNOWN"
-                    )
-                ).upper()
+                + zone_type
                 + "\n"
-                + str(
-                    zone.get(
-                        "low",
-                        "?"
-                    )
-                )
+
+                "Zone: "
+                + str(low)
                 + " - "
-                + str(
-                    zone.get(
-                        "high",
-                        "?"
-                    )
-                )
-                + "\nTouches: "
-                + str(
-                    zone.get(
-                        "touches",
-                        "N/A"
-                    )
-                )
-                + "\nStructure Bias: "
+                + str(high)
+                + "\n"
+
+                "Distance: "
+                + distance_text
+                + "\n"
+
+                "Recent Touches: "
+                + str(touches)
+                + "\n"
+
+                "Structure Bias: "
                 + str(
                     zone.get(
                         "structure_bias",
@@ -739,18 +932,25 @@ def send_report(
     else:
 
         report += (
-            "\n\nAOIs\n"
-            "No valid AOIs found."
+            "\n\nNEAREST RELEVANT AOIs\n"
+            "No relevant AOIs within "
+            + str(
+                300
+            )
+            + " points of current price."
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # TRADE LEVELS
-    # --------------------------------------------------------
+    # ========================================================
 
-    if signal.get("entry") is not None:
+    if signal.get(
+        "entry"
+    ) is not None:
 
         report += (
             "\n\nTRADE LEVELS\n"
+
             "Entry: "
             + str(
                 round(
@@ -760,7 +960,9 @@ def send_report(
             )
         )
 
-    if signal.get("stop_loss") is not None:
+    if signal.get(
+        "stop_loss"
+    ) is not None:
 
         report += (
             "\nStop Loss: "
@@ -772,7 +974,9 @@ def send_report(
             )
         )
 
-    if signal.get("take_profit") is not None:
+    if signal.get(
+        "take_profit"
+    ) is not None:
 
         report += (
             "\nTake Profit: "
@@ -784,9 +988,9 @@ def send_report(
             )
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # APPROACHING SETUP
-    # --------------------------------------------------------
+    # ========================================================
 
     watch = find_approaching_aoi(
         data_daily,
@@ -815,9 +1019,13 @@ def send_report(
             + "\n"
 
             "AOI: "
-            + str(zone.get("low"))
+            + str(
+                zone.get("low")
+            )
             + " - "
-            + str(zone.get("high"))
+            + str(
+                zone.get("high")
+            )
             + "\n"
 
             "Distance: "
@@ -829,9 +1037,9 @@ def send_report(
             )
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # BOT STATUS
-    # --------------------------------------------------------
+    # ========================================================
 
     report += (
         "\n\nBOT STATUS\n"
@@ -874,7 +1082,9 @@ print(
     "Loading historical market data..."
 )
 
-data_15m, data_daily = get_market_data()
+data_15m, data_daily = (
+    get_market_data()
+)
 
 print(
     "Historical data loaded:",
@@ -970,7 +1180,8 @@ while True:
         for update in updates:
 
             telegram_offset = (
-                update["update_id"] + 1
+                update["update_id"]
+                + 1
             )
 
             message = update.get(
@@ -980,11 +1191,13 @@ while True:
             if not message:
                 continue
 
+            chat = message.get(
+                "chat",
+                {}
+            )
+
             chat_id = str(
-                message.get(
-                    "chat",
-                    {}
-                ).get(
+                chat.get(
                     "id",
                     ""
                 )
@@ -1022,7 +1235,7 @@ while True:
                     )
 
         # ----------------------------------------------------
-        # REFRESH HISTORICAL DATA
+        # REFRESH DATA
         # ----------------------------------------------------
 
         if (
@@ -1040,7 +1253,9 @@ while True:
                 get_market_data()
             )
 
-            last_data_refresh = time.time()
+            last_data_refresh = (
+                time.time()
+            )
 
             print(
                 "Data refreshed:",
@@ -1058,17 +1273,31 @@ while True:
             last_trusted_price
         )
 
-        price = price_data["price"]
-        price_source = price_data["source"]
-        price_trusted = price_data["trusted"]
+        price = price_data[
+            "price"
+        ]
+
+        price_source = price_data[
+            "source"
+        ]
+
+        price_trusted = price_data[
+            "trusted"
+        ]
 
         last_price = price
-        last_price_source = price_source
-        last_price_trusted = price_trusted
+        last_price_source = (
+            price_source
+        )
+        last_price_trusted = (
+            price_trusted
+        )
 
         if price_trusted:
 
-            last_trusted_price = price
+            last_trusted_price = (
+                price
+            )
 
         # ----------------------------------------------------
         # UPDATE LIVE CANDLE
@@ -1101,7 +1330,8 @@ while True:
         # ----------------------------------------------------
 
         if (
-            current_signal in (
+            current_signal
+            in (
                 "BUY",
                 "SELL"
             )
@@ -1110,12 +1340,21 @@ while True:
 
             alert_key = (
                 current_signal,
-                signal.get("entry"),
-                signal.get("stop_loss"),
-                signal.get("take_profit")
+                signal.get(
+                    "entry"
+                ),
+                signal.get(
+                    "stop_loss"
+                ),
+                signal.get(
+                    "take_profit"
+                )
             )
 
-            if alert_key != last_signal_alert:
+            if (
+                alert_key
+                != last_signal_alert
+            ):
 
                 send_telegram(
                     format_signal_message(
@@ -1125,28 +1364,41 @@ while True:
                 )
 
                 print()
-                print("=" * 60)
+                print(
+                    "=" * 60
+                )
+
                 print(
                     datetime.now().strftime(
                         "%Y-%m-%d %H:%M:%S"
                     )
                 )
+
                 print(
                     "SIGNAL:",
                     current_signal
                 )
+
                 print(
                     "PRICE:",
-                    round(price, 2)
+                    round(
+                        price,
+                        2
+                    )
                 )
+
                 print(
                     "SOURCE:",
                     price_source
                 )
+
                 print(
                     "TELEGRAM: SIGNAL SENT"
                 )
-                print("=" * 60)
+
+                print(
+                    "=" * 60
+                )
 
                 last_signal_alert = (
                     alert_key
@@ -1160,23 +1412,33 @@ while True:
 
         elif price_trusted:
 
-            watch = find_approaching_aoi(
-                data_daily,
-                signal.get(
-                    "bias",
-                    {}
-                ),
-                price
+            watch = (
+                find_approaching_aoi(
+                    data_daily,
+                    signal.get(
+                        "bias",
+                        {}
+                    ),
+                    price
+                )
             )
 
             if watch:
 
-                zone = watch["zone"]
+                zone = watch[
+                    "zone"
+                ]
 
                 watch_key = (
-                    watch["direction"],
-                    zone.get("timeframe"),
-                    zone.get("type"),
+                    watch[
+                        "direction"
+                    ],
+                    zone.get(
+                        "timeframe"
+                    ),
+                    zone.get(
+                        "type"
+                    ),
                     round(
                         float(
                             zone["low"]
@@ -1191,20 +1453,29 @@ while True:
                     )
                 )
 
-                if watch_key != last_watch_alert:
+                if (
+                    watch_key
+                    != last_watch_alert
+                ):
 
                     send_telegram(
                         format_watch_message(
                             watch,
                             price,
-                            signal["bias"]
+                            signal.get(
+                                "bias",
+                                {}
+                            )
                         )
                     )
 
                     print()
                     print(
-                        "TELEGRAM: APPROACHING "
-                        + watch["direction"]
+                        "TELEGRAM: "
+                        "APPROACHING "
+                        + watch[
+                            "direction"
+                        ]
                         + " ALERT SENT"
                     )
 
@@ -1232,7 +1503,10 @@ while True:
                 ),
                 "| BOT ALIVE",
                 "| PRICE:",
-                round(price, 2),
+                round(
+                    price,
+                    2
+                ),
                 "| SOURCE:",
                 price_source,
                 "| TRUSTED:",
@@ -1247,7 +1521,9 @@ while True:
                 flush=True
             )
 
-            last_heartbeat = time.time()
+            last_heartbeat = (
+                time.time()
+            )
 
         time.sleep(
             PRICE_INTERVAL
@@ -1256,7 +1532,9 @@ while True:
     except KeyboardInterrupt:
 
         print()
-        print("BOT STOPPED")
+        print(
+            "BOT STOPPED"
+        )
 
         break
 
