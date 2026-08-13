@@ -735,6 +735,10 @@ while True:
         price_source = price_data["source"]
         price_trusted = price_data["trusted"]
 
+        last_price = price
+        last_price_source = price_source
+        last_price_trusted = price_trusted
+
         if price_trusted:
 
             last_trusted_price = price
@@ -759,6 +763,8 @@ while True:
         )
 
         current_signal = signal["signal"]
+
+        last_signal = signal
 
         # -------------------------------------------------
         # ONLY ALLOW TRADING SIGNALS FROM A TRUSTED
