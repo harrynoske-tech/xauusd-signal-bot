@@ -465,14 +465,14 @@ def get_telegram_updates(offset=None):
     return response.json()["result"]
 
 def send_report(
-    price,
-    price_source,
-    price_trusted,
-    signal,
+    last_price,
+    last_price_source,
+    last_price_trusted,
+    last_signal,
     data_daily,
     last_data_refresh,
     last_heartbeat
-):
+)
 
     bias = signal["bias"]
 
