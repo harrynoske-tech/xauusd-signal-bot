@@ -326,7 +326,33 @@ def find_approaching_aoi(
 
     overall_bias = bias["overall"]
 
+    # Make sure we always iterate over AOI dictionaries.
+    if isinstance(areas, dict):
+
+        # Single AOI dictionary
+        if "type" in areas:
+
+            areas = [areas]
+
+        else:
+
+            # AOIs grouped inside a dictionary
+            flattened = []
+
+            for value in areas.values():
+
+                if isinstance(value, list):
+                    flattened.extend(value)
+
+                elif isinstance(value, dict):
+                    flattened.append(value)
+
+            areas = flattened
+
     for zone in areas:
+
+        if not isinstance(zone, dict):
+            continue
 
         zone_type = zone.get("type")
 
@@ -339,7 +365,10 @@ def find_approaching_aoi(
         low = float(low)
         high = float(high)
 
-        # Bearish bias approaching resistance
+        # ------------------------------------------------
+        # BEARISH -> APPROACHING RESISTANCE
+        # ------------------------------------------------
+
         if (
             overall_bias == "BEARISH"
             and zone_type == "resistance"
@@ -356,7 +385,10 @@ def find_approaching_aoi(
                     "distance": distance,
                 }
 
-        # Bullish bias approaching support
+        # ------------------------------------------------
+        # BULLISH -> APPROACHING SUPPORT
+        # ------------------------------------------------
+
         if (
             overall_bias == "BULLISH"
             and zone_type == "support"
