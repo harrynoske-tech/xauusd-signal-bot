@@ -12,6 +12,10 @@ from strategy import (
 )
 
 
+# ============================================================
+# CONFIG
+# ============================================================
+
 PRIMARY_PRICE_URL = "https://api.gold-api.com/price/XAU"
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -21,13 +25,17 @@ PRICE_INTERVAL = 1
 DATA_REFRESH_INTERVAL = 60
 HEARTBEAT_INTERVAL = 30
 
-# Maximum acceptable difference between the fallback
-# price and the last trusted Gold API price.
+# Maximum difference allowed between Yahoo fallback
+# and the last trusted Gold API price.
 MAX_PRICE_DISCREPANCY = 5.0
 
-# Price distance from an AOI required for an early warning.
+# Distance from an AOI required for an early warning.
 AOI_APPROACH_DISTANCE = 5.0
 
+
+# ============================================================
+# PRICE SOURCES
+# ============================================================
 
 def get_gold_api_price():
 
@@ -64,9 +72,9 @@ def get_yahoo_price():
 
 def get_live_price(last_trusted_price):
 
-    # -------------------------------------------------
-    # PRIMARY PRICE SOURCE
-    # -------------------------------------------------
+    # --------------------------------------------------------
+    # PRIMARY: GOLD API
+    # --------------------------------------------------------
 
     try:
 
@@ -86,16 +94,14 @@ def get_live_price(last_trusted_price):
             flush=True
         )
 
-    # -------------------------------------------------
-    # FALLBACK PRICE SOURCE
-    # -------------------------------------------------
+    # --------------------------------------------------------
+    # FALLBACK: YAHOO FINANCE
+    # --------------------------------------------------------
 
     try:
 
         fallback_price = get_yahoo_price()
 
-        # If we have a previously trusted Gold API price,
-        # make sure Yahoo is reasonably close to it.
         if last_trusted_price is not None:
 
             difference = abs(
@@ -148,6 +154,10 @@ def get_live_price(last_trusted_price):
         )
 
 
+# ============================================================
+# TELEGRAM
+# ============================================================
+
 def send_telegram(message):
 
     url = (
@@ -167,6 +177,36 @@ def send_telegram(message):
 
     response.raise_for_status()
 
+
+def get_telegram_updates(offset=None):
+
+    url = (
+        "https://api.telegram.org/bot"
+        + TELEGRAM_TOKEN
+        + "/getUpdates"
+    )
+
+    params = {
+        "timeout": 1
+    }
+
+    if offset is not None:
+        params["offset"] = offset
+
+    response = requests.get(
+        url,
+        params=params,
+        timeout=5
+    )
+
+    response.raise_for_status()
+
+    return response.json()["result"]
+
+
+# ============================================================
+# MARKET DATA
+# ============================================================
 
 def get_market_data():
 
@@ -267,6 +307,10 @@ def update_live_candle(
     return data_15m
 
 
+# ============================================================
+# APPROACHING AOI
+# ============================================================
+
 def find_approaching_aoi(
     data_daily,
     bias,
@@ -295,10 +339,7 @@ def find_approaching_aoi(
         low = float(low)
         high = float(high)
 
-        # -------------------------------------------------
-        # BEARISH -> APPROACHING RESISTANCE
-        # -------------------------------------------------
-
+        # Bearish bias approaching resistance
         if (
             overall_bias == "BEARISH"
             and zone_type == "resistance"
@@ -315,10 +356,7 @@ def find_approaching_aoi(
                     "distance": distance,
                 }
 
-        # -------------------------------------------------
-        # BULLISH -> APPROACHING SUPPORT
-        # -------------------------------------------------
-
+        # Bullish bias approaching support
         if (
             overall_bias == "BULLISH"
             and zone_type == "support"
@@ -367,11 +405,14 @@ def format_watch_message(
         "Distance: "
         + str(round(distance, 2))
         + "\n\n"
-        "EARLY WARNING ONLY"
-        "\n"
+        "EARLY WARNING ONLY\n"
         "Confirmation is still required."
     )
 
+
+# ============================================================
+# TRADE SIGNAL MESSAGE
+# ============================================================
 
 def format_signal_message(
     signal,
@@ -439,40 +480,19 @@ def format_signal_message(
     return message
 
 
-def get_telegram_updates(offset=None):
-
-    url = (
-        "https://api.telegram.org/bot"
-        + TELEGRAM_TOKEN
-        + "/getUpdates"
-    )
-
-    params = {
-        "timeout": 1
-    }
-
-    if offset is not None:
-        params["offset"] = offset
-
-    response = requests.get(
-        url,
-        params=params,
-        timeout=5
-    )
-
-    response.raise_for_status()
-
-    return response.json()["result"]
+# ============================================================
+# /REPORT
+# ============================================================
 
 def send_report(
-    last_price,
-    last_price_source,
-    last_price_trusted,
-    last_signal,
+    price,
+    price_source,
+    price_trusted,
+    signal,
     data_daily,
     last_data_refresh,
     last_heartbeat
-)
+):
 
     bias = signal["bias"]
 
@@ -482,40 +502,63 @@ def send_report(
 
     report = (
         "XAUUSD MARKET REPORT\n\n"
+
         "PRICE\n"
         "Current: "
         + str(round(price, 2))
         + "\n"
+
         "Source: "
         + price_source
         + "\n"
+
         "Trusted: "
-        + ("YES" if price_trusted else "NO")
+        + (
+            "YES"
+            if price_trusted
+            else "NO"
+        )
+
         + "\n\n"
+
         "BIAS\n"
+
         "Weekly: "
         + bias["weekly"]
         + "\n"
+
         "Daily: "
         + bias["daily"]
         + "\n"
+
         "4H: "
         + bias["4h"]
         + "\n"
+
         "Overall: "
         + bias["overall"]
+
         + "\n\n"
+
         "SIGNAL\n"
+
         "Status: "
         + signal["signal"]
         + "\n"
+
         "Reason: "
         + signal["reason"]
     )
 
+    # --------------------------------------------------------
+    # AOIs
+    # --------------------------------------------------------
+
     if areas:
 
-        report += "\n\nAOIs\n"
+        report += (
+            "\n\nAOIs\n"
+        )
 
         for zone in areas[:5]:
 
@@ -527,7 +570,12 @@ def send_report(
                 + " - "
                 + str(zone["high"])
                 + "\nTouches: "
-                + str(zone.get("touches", "N/A"))
+                + str(
+                    zone.get(
+                        "touches",
+                        "N/A"
+                    )
+                )
                 + "\nBias: "
                 + str(
                     zone.get(
@@ -536,6 +584,10 @@ def send_report(
                     )
                 )
             )
+
+    # --------------------------------------------------------
+    # TRADE LEVELS
+    # --------------------------------------------------------
 
     if signal.get("entry") is not None:
 
@@ -574,16 +626,59 @@ def send_report(
             )
         )
 
+    # --------------------------------------------------------
+    # APPROACHING SETUP
+    # --------------------------------------------------------
+
+    watch = find_approaching_aoi(
+        data_daily,
+        bias,
+        price
+    )
+
+    if watch:
+
+        report += (
+            "\n\nAPPROACHING SETUP\n"
+            "Direction: "
+            + watch["direction"]
+            + "\n"
+            "AOI: "
+            + str(
+                watch["zone"]["low"]
+            )
+            + " - "
+            + str(
+                watch["zone"]["high"]
+            )
+            + "\n"
+            "Distance: "
+            + str(
+                round(
+                    watch["distance"],
+                    2
+                )
+            )
+        )
+
+    # --------------------------------------------------------
+    # BOT STATUS
+    # --------------------------------------------------------
+
     report += (
         "\n\nBOT STATUS\n"
+
         "Status: ONLINE\n"
+
         "Last data refresh: "
         + datetime.fromtimestamp(
             last_data_refresh
         ).strftime(
             "%H:%M:%S"
         )
+
         + "\n"
+
         "Last heartbeat: "
         + datetime.fromtimestamp(
             last_heartbeat
@@ -593,6 +688,11 @@ def send_report(
     )
 
     send_telegram(report)
+
+
+# ============================================================
+# STARTUP
+# ============================================================
 
 print()
 print("=" * 60)
@@ -628,9 +728,15 @@ print(
     "AOI approach distance:",
     AOI_APPROACH_DISTANCE
 )
+print("Telegram command: /report")
 print("Waiting for BUY or SELL...")
 print("Press Ctrl+C to stop.")
 print()
+
+
+# ============================================================
+# STATE
+# ============================================================
 
 last_data_refresh = time.time()
 last_heartbeat = time.time()
@@ -643,6 +749,7 @@ last_watch_alert = None
 last_price = None
 last_price_source = "NONE"
 last_price_trusted = False
+
 last_signal = {
     "signal": "NONE",
     "reason": "BOT_STARTING",
@@ -650,18 +757,36 @@ last_signal = {
         "weekly": "UNKNOWN",
         "daily": "UNKNOWN",
         "4h": "UNKNOWN",
-        "overall": "UNKNOWN"
+        "overall": "UNKNOWN",
     },
-    "aoi": None
+    "aoi": None,
 }
+
+# Telegram update offset.
+telegram_offset = None
+
+
+# ============================================================
+# MAIN LOOP
+# ============================================================
 
 while True:
 
     try:
 
-                updates = get_telegram_updates()
+        # ----------------------------------------------------
+        # TELEGRAM COMMANDS
+        # ----------------------------------------------------
+
+        updates = get_telegram_updates(
+            telegram_offset
+        )
 
         for update in updates:
+
+            telegram_offset = (
+                update["update_id"] + 1
+            )
 
             message = update.get(
                 "message"
@@ -680,23 +805,34 @@ while True:
             text = message.get(
                 "text",
                 ""
-            ).strip()
+            ).strip().lower()
 
             if text == "/report":
 
-                send_report(
-                    price,
-                    price_source,
-                    price_trusted,
-                    signal,
-                    data_daily,
-                    last_data_refresh,
-                    last_heartbeat
-                )
+                if last_price is None:
 
-        # -------------------------------------------------
+                    send_telegram(
+                        "XAUUSD REPORT\n\n"
+                        "Bot is still loading "
+                        "market data. Try again "
+                        "in a few seconds."
+                    )
+
+                else:
+
+                    send_report(
+                        last_price,
+                        last_price_source,
+                        last_price_trusted,
+                        last_signal,
+                        data_daily,
+                        last_data_refresh,
+                        last_heartbeat
+                    )
+
+        # ----------------------------------------------------
         # REFRESH HISTORICAL DATA
-        # -------------------------------------------------
+        # ----------------------------------------------------
 
         if (
             time.time()
@@ -723,9 +859,9 @@ while True:
                 "daily candles"
             )
 
-        # -------------------------------------------------
+        # ----------------------------------------------------
         # LIVE PRICE
-        # -------------------------------------------------
+        # ----------------------------------------------------
 
         price_data = get_live_price(
             last_trusted_price
@@ -743,18 +879,18 @@ while True:
 
             last_trusted_price = price
 
-        # -------------------------------------------------
-        # UPDATE LIVE CANDLE
-        # -------------------------------------------------
+        # ----------------------------------------------------
+        # UPDATE LIVE 15M CANDLE
+        # ----------------------------------------------------
 
         data_15m = update_live_candle(
             data_15m,
             price
         )
 
-        # -------------------------------------------------
+        # ----------------------------------------------------
         # RUN STRATEGY
-        # -------------------------------------------------
+        # ----------------------------------------------------
 
         signal = generate_signal(
             data_15m,
@@ -766,10 +902,9 @@ while True:
 
         last_signal = signal
 
-        # -------------------------------------------------
-        # ONLY ALLOW TRADING SIGNALS FROM A TRUSTED
-        # LIVE PRICE
-        # -------------------------------------------------
+        # ----------------------------------------------------
+        # CONFIRMED BUY / SELL
+        # ----------------------------------------------------
 
         if (
             current_signal in (
@@ -779,9 +914,17 @@ while True:
             and price_trusted
         ):
 
-            entry = signal.get("entry")
-            stop_loss = signal.get("stop_loss")
-            take_profit = signal.get("take_profit")
+            entry = signal.get(
+                "entry"
+            )
+
+            stop_loss = signal.get(
+                "stop_loss"
+            )
+
+            take_profit = signal.get(
+                "take_profit"
+            )
 
             alert_key = (
                 current_signal,
@@ -823,13 +966,15 @@ while True:
                 )
                 print("=" * 60)
 
-                last_signal_alert = alert_key
+                last_signal_alert = (
+                    alert_key
+                )
 
                 last_watch_alert = None
 
-        # -------------------------------------------------
+        # ----------------------------------------------------
         # APPROACHING AOI
-        # -------------------------------------------------
+        # ----------------------------------------------------
 
         elif price_trusted:
 
@@ -870,15 +1015,17 @@ while True:
                         + " ALERT SENT"
                     )
 
-                    last_watch_alert = watch_key
+                    last_watch_alert = (
+                        watch_key
+                    )
 
             else:
 
                 last_watch_alert = None
 
-        # -------------------------------------------------
+        # ----------------------------------------------------
         # HEARTBEAT
-        # -------------------------------------------------
+        # ----------------------------------------------------
 
         if (
             time.time()
@@ -914,6 +1061,7 @@ while True:
 
         print()
         print("BOT STOPPED")
+
         break
 
     except Exception as error:
