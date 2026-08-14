@@ -19,16 +19,12 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests pandas yfinance curl_cffi
+          pip install pandas requests dukascopy-python
 
-      - name: Test FCS API
-        env:
-          FCS_API_KEY: ${{ secrets.FCS_API_KEY }}
+      - name: Download Dukascopy XAUUSD data
         run: |
-          python fcs_test.py
+          python dukascopy_data.py
 
-      - name: Run FCS XAUUSD backtest
-        env:
-          FCS_API_KEY: ${{ secrets.FCS_API_KEY }}
+      - name: Run backtest
         run: |
           python backtest.py
