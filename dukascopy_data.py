@@ -3,7 +3,7 @@ from datetime import datetime
 
 import pandas as pd
 import dukascopy_python
-from dukascopy_python.instruments import INSTRUMENT_XAUUSD
+from dukascopy_python import instruments
 
 
 # ============================================================
@@ -19,7 +19,46 @@ OFFER_SIDE = dukascopy_python.OFFER_SIDE_BID
 
 
 # ============================================================
-# DOWNLOAD FUNCTION
+# FIND XAUUSD INSTRUMENT
+# ============================================================
+
+def find_xauusd():
+
+    candidates = [
+        name
+        for name in dir(instruments)
+        if "XAU" in name.upper()
+        or "GOLD" in name.upper()
+    ]
+
+    print(
+        "Available XAU/GOLD instruments:",
+        candidates
+    )
+
+    for name in candidates:
+
+        value = getattr(
+            instruments,
+            name
+        )
+
+        if "XAUUSD" in name.upper():
+
+            print(
+                "Using instrument:",
+                name
+            )
+
+            return value
+
+    raise RuntimeError(
+        "Could not find XAUUSD in dukascopy_python."
+    )
+
+
+# ============================================================
+# DOWNLOAD
 # ============================================================
 
 def download(
@@ -108,35 +147,35 @@ def main():
     print("DUKASCOPY XAUUSD DATA DOWNLOADER")
     print("=" * 60)
 
-    print()
-    print("Source: Dukascopy")
-    print("Symbol: XAUUSD")
-    print("Start:", START_DATE)
-    print("End:", END_DATE)
+    print(
+        "Start:",
+        START_DATE
+    )
+
+    print(
+        "End:",
+        END_DATE
+    )
 
     os.makedirs(
         OUTPUT_DIR,
         exist_ok=True
     )
 
-    # --------------------------------------------------------
-    # 15 MINUTE DATA
-    # --------------------------------------------------------
+    instrument = find_xauusd()
 
+    # 15-minute data
     download(
-        INSTRUMENT_XAUUSD,
+        instrument,
         dukascopy_python.INTERVAL_MINUTE_15,
         START_DATE,
         END_DATE,
         "XAUUSD_15m.csv",
     )
 
-    # --------------------------------------------------------
-    # DAILY DATA
-    # --------------------------------------------------------
-
+    # Daily data
     download(
-        INSTRUMENT_XAUUSD,
+        instrument,
         dukascopy_python.INTERVAL_DAY_1,
         START_DATE,
         END_DATE,
