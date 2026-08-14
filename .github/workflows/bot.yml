@@ -21,7 +21,7 @@ jobs:
         run: |
           pip install pandas requests dukascopy-python
 
-      - name: Download Dukascopy XAUUSD data
+      - name: Download Dukascopy data
         run: |
           python dukascopy_data.py
 
