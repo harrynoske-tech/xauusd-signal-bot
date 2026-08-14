@@ -9,8 +9,9 @@ if not API_KEY:
 url = "https://api-v4.fcsapi.com/forex/history"
 
 params = {
-    "symbol": "XAU/USD",
+    "symbol": "XAUUSD",
     "period": "15m",
+    "type": "commodity",
     "length": 300,
     "access_key": API_KEY,
 }
@@ -38,7 +39,9 @@ if data.get("status") is True:
     print()
     print("LATEST 5 CANDLES:")
 
-    for timestamp, candle in list(candles.items())[-5:]:
+    items = list(candles.items())[-5:]
+
+    for timestamp, candle in items:
 
         print(
             timestamp,
@@ -48,7 +51,7 @@ if data.get("status") is True:
             "L:", candle.get("l"),
             "C:", candle.get("c"),
             "|",
-            candle.get("tm")
+            "TIME:", candle.get("tm")
         )
 
 else:
