@@ -6,8 +6,8 @@ from strategy_v8 import generate_signal
 
 
 # ============================================================
-# XAUUSD STRATEGY BACKTEST V8.0
-# MULTI-FACTOR RESEARCH ENGINE
+# XAUUSD STRATEGY BACKTEST V8.1
+# CORRECT CHRONOLOGICAL SIMULATION
 # ============================================================
 
 DATA_15M = "data/XAUUSD_15m.csv"
@@ -16,12 +16,13 @@ DATA_DAILY = "data/XAUUSD_1d.csv"
 MIN_15M_CANDLES = 300
 MIN_DAILY_CANDLES = 100
 
-# Evaluate every completed 15-minute candle.
-CHECK_EVERY = 1
-
-# Maximum historical windows passed into strategy_v8.
 MAX_15M_CANDLES = 1000
 MAX_DAILY_CANDLES = 500
+
+# After a trade closes, the system must see this many
+# consecutive candles with NO signal before another trade
+# using the same market condition can be considered.
+REARM_BARS = 8
 
 
 # ============================================================
@@ -32,7 +33,7 @@ def load_data():
 
     print()
     print("=" * 60)
-    print("XAUUSD STRATEGY BACKTEST V8.0")
+    print("XAUUSD STRATEGY BACKTEST V8.1")
     print("=" * 60)
     print()
 
@@ -63,27 +64,6 @@ def load_data():
         parse_dates=True
     )
 
-    data_15m = (
-        data_15m
-        .sort_index()
-        .loc[
-            ~data_15m.index.duplicated(
-                keep="last"
-            )
-        ]
-    )
-
-    data_daily = (
-        data_daily
-        .sort_index()
-        .loc[
-            ~data_daily.index.duplicated(
-                keep="last"
-            )
-        ]
-    )
-
-    # Standardise OHLC names.
     data_15m.columns = [
         str(c).capitalize()
         for c in data_15m.columns
@@ -105,16 +85,13 @@ def load_data():
 
         if column not in data_15m.columns:
             raise RuntimeError(
-                f"15M data missing column: {column}"
+                f"15M data missing {column}"
             )
 
         if column not in data_daily.columns:
             raise RuntimeError(
-                f"Daily data missing column: {column}"
+                f"Daily data missing {column}"
             )
-
-    # Ensure numeric OHLC.
-    for column in required:
 
         data_15m[column] = pd.to_numeric(
             data_15m[column],
@@ -126,13 +103,29 @@ def load_data():
             errors="coerce"
         )
 
-    data_15m = data_15m.dropna(
-        subset=required
+    data_15m = (
+        data_15m
+        .dropna(subset=required)
+        .sort_index()
     )
 
-    data_daily = data_daily.dropna(
-        subset=required
+    data_daily = (
+        data_daily
+        .dropna(subset=required)
+        .sort_index()
     )
+
+    data_15m = data_15m.loc[
+        ~data_15m.index.duplicated(
+            keep="last"
+        )
+    ]
+
+    data_daily = data_daily.loc[
+        ~data_daily.index.duplicated(
+            keep="last"
+        )
+    ]
 
     print(
         "15m candles:",
@@ -158,16 +151,6 @@ def load_data():
         data_daily.index.max()
     )
 
-    if len(data_15m) < MIN_15M_CANDLES:
-        raise RuntimeError(
-            "Not enough 15M candles."
-        )
-
-    if len(data_daily) < MIN_DAILY_CANDLES:
-        raise RuntimeError(
-            "Not enough daily candles."
-        )
-
     return data_15m, data_daily
 
 
@@ -175,51 +158,15 @@ def load_data():
 # HELPERS
 # ============================================================
 
-def safe_float(value):
+def number(value):
 
     try:
         return float(value)
-
-    except (
-        TypeError,
-        ValueError
-    ):
+    except Exception:
         return None
 
 
-def get_score(signal):
-
-    score = safe_float(
-        signal.get("score")
-    )
-
-    if score is None:
-        return 0.0
-
-    return score
-
-
-def get_components(signal):
-
-    components = signal.get(
-        "components",
-        {}
-    )
-
-    if not isinstance(
-        components,
-        dict
-    ):
-        return {}
-
-    return components
-
-
-# ============================================================
-# TRADE RESULT
-# ============================================================
-
-def fast_trade_result(
+def result_for_trade(
     direction,
     entry,
     stop_loss,
@@ -230,15 +177,6 @@ def fast_trade_result(
     timestamps
 ):
 
-    if start_index >= len(highs):
-
-        return (
-            "OPEN",
-            None,
-            None,
-            0.0
-        )
-
     future_highs = highs[
         start_index:
     ]
@@ -247,19 +185,16 @@ def fast_trade_result(
         start_index:
     ]
 
-    if direction == "SELL":
+    if len(future_highs) == 0:
 
-        stop_hits = (
-            future_highs
-            >= stop_loss
-        )
+        return {
+            "result": "OPEN",
+            "exit_index": None,
+            "exit_time": None,
+            "r": 0.0
+        }
 
-        target_hits = (
-            future_lows
-            <= take_profit
-        )
-
-    else:
+    if direction == "BUY":
 
         stop_hits = (
             future_lows
@@ -271,6 +206,18 @@ def fast_trade_result(
             >= take_profit
         )
 
+    else:
+
+        stop_hits = (
+            future_highs
+            >= stop_loss
+        )
+
+        target_hits = (
+            future_lows
+            <= take_profit
+        )
+
     stop_positions = np.flatnonzero(
         stop_hits
     )
@@ -279,73 +226,73 @@ def fast_trade_result(
         target_hits
     )
 
-    first_stop = (
+    stop_pos = (
         int(stop_positions[0])
         if len(stop_positions)
         else None
     )
 
-    first_target = (
+    target_pos = (
         int(target_positions[0])
         if len(target_positions)
         else None
     )
 
-    # Neither level hit.
     if (
-        first_stop is None
-        and first_target is None
+        stop_pos is None
+        and target_pos is None
     ):
 
-        return (
-            "OPEN",
-            None,
-            None,
-            0.0
-        )
+        return {
+            "result": "OPEN",
+            "exit_index": None,
+            "exit_time": None,
+            "r": 0.0
+        }
 
-    # Both hit during the same candle.
-    # Conservative assumption:
-    # treat as ambiguous.
+    # Both TP and SL occur on the same candle.
+    # Conservative assumption = SL.
     if (
-        first_stop is not None
-        and first_target is not None
-        and first_stop == first_target
+        stop_pos is not None
+        and target_pos is not None
+        and stop_pos == target_pos
     ):
 
-        position = first_stop
+        position = stop_pos
 
-        return (
-            "AMBIGUOUS",
-            None,
-            timestamps[
-                start_index + position
-            ],
-            0.0
-        )
+        return {
+            "result": "AMBIGUOUS",
+            "exit_index":
+                start_index + position,
+            "exit_time":
+                timestamps[
+                    start_index + position
+                ],
+            "r": -1.0
+        }
 
-    # Stop hit first.
     if (
-        first_target is None
+        target_pos is None
         or (
-            first_stop is not None
-            and first_stop < first_target
+            stop_pos is not None
+            and stop_pos < target_pos
         )
     ):
 
-        position = first_stop
+        position = stop_pos
 
-        return (
-            "SL",
-            stop_loss,
-            timestamps[
-                start_index + position
-            ],
-            -1.0
-        )
+        return {
+            "result": "SL",
+            "exit_index":
+                start_index + position,
+            "exit_time":
+                timestamps[
+                    start_index + position
+                ],
+            "r": -1.0
+        }
 
-    # Target hit first.
-    position = first_target
+    position = target_pos
 
     risk = abs(
         entry - stop_loss
@@ -355,217 +302,22 @@ def fast_trade_result(
         take_profit - entry
     )
 
-    r_multiple = (
+    r = (
         reward / risk
         if risk > 0
-        else 0.0
+        else 0
     )
 
-    return (
-        "TP",
-        take_profit,
-        timestamps[
-            start_index + position
-        ],
-        r_multiple
-    )
-
-
-# ============================================================
-# RESULT STATISTICS
-# ============================================================
-
-def print_score_analysis(signals):
-
-    print()
-    print("=" * 60)
-    print("V8 SCORE ANALYSIS")
-    print("=" * 60)
-
-    if not signals:
-
-        print("No signals.")
-        return
-
-    thresholds = [
-        60,
-        65,
-        70,
-        75,
-        80,
-        85,
-        90,
-        95
-    ]
-
-    print()
-    print(
-        "THRESHOLD | TRADES | WINS | LOSSES | WIN RATE | TOTAL R"
-    )
-    print("-" * 60)
-
-    for threshold in thresholds:
-
-        trades = [
-            x
-            for x in signals
-            if x["score"] >= threshold
-            and x["result"] in (
-                "TP",
-                "SL"
-            )
-        ]
-
-        total = len(trades)
-
-        wins = sum(
-            x["result"] == "TP"
-            for x in trades
-        )
-
-        losses = sum(
-            x["result"] == "SL"
-            for x in trades
-        )
-
-        total_r = sum(
-            x["r"]
-            for x in trades
-        )
-
-        win_rate = (
-            wins / total * 100
-            if total
-            else 0
-        )
-
-        print(
-            f"{threshold:9.0f} | "
-            f"{total:6d} | "
-            f"{wins:4d} | "
-            f"{losses:6d} | "
-            f"{win_rate:8.2f}% | "
-            f"{total_r:7.2f}"
-        )
-
-    print()
-    print(
-        "IMPORTANT: Higher thresholds reduce trade frequency."
-    )
-
-
-def print_component_analysis(signals):
-
-    print()
-    print("=" * 60)
-    print("V8 COMPONENT ANALYSIS")
-    print("=" * 60)
-
-    if not signals:
-        return
-
-    components = [
-        "trend",
-        "momentum",
-        "breakout",
-        "daily",
-        "htf",
-        "volatility",
-        "session"
-    ]
-
-    for component_name in components:
-
-        component_trades = []
-
-        for trade in signals:
-
-            component = trade[
-                "components"
-            ].get(
-                component_name
-            )
-
-            if not isinstance(
-                component,
-                dict
-            ):
-                continue
-
-            component_trades.append(
-                (
-                    trade,
-                    component
-                )
-            )
-
-        if not component_trades:
-            continue
-
-        print()
-        print(
-            component_name.upper()
-        )
-
-        directional = {
-            "BUY": [],
-            "SELL": [],
-            "NONE": []
-        }
-
-        for trade, component in component_trades:
-
-            direction = component.get(
-                "direction",
-                "NONE"
-            )
-
-            if direction not in directional:
-                direction = "NONE"
-
-            directional[
-                direction
-            ].append(trade)
-
-        for direction, trades in directional.items():
-
-            if not trades:
-                continue
-
-            resolved = [
-                x
-                for x in trades
-                if x["result"] in (
-                    "TP",
-                    "SL"
-                )
-            ]
-
-            if not resolved:
-                continue
-
-            wins = sum(
-                x["result"] == "TP"
-                for x in resolved
-            )
-
-            win_rate = (
-                wins
-                / len(resolved)
-                * 100
-            )
-
-            total_r = sum(
-                x["r"]
-                for x in resolved
-            )
-
-            print(
-                f"  {direction:5s} | "
-                f"Trades: {len(resolved):4d} | "
-                f"Win: {win_rate:6.2f}% | "
-                f"R: {total_r:7.2f}"
-            )
+    return {
+        "result": "TP",
+        "exit_index":
+            start_index + position,
+        "exit_time":
+            timestamps[
+                start_index + position
+            ],
+        "r": float(r)
+    }
 
 
 # ============================================================
@@ -574,10 +326,6 @@ def print_component_analysis(signals):
 
 data_15m, data_daily = load_data()
 
-
-# ============================================================
-# PRE-COMPUTE ARRAYS
-# ============================================================
 
 timestamps = (
     data_15m.index.to_numpy()
@@ -600,54 +348,38 @@ closes = (
 
 
 # ============================================================
-# DAILY POSITION LOOKUP
-# ============================================================
-
-daily_index = (
-    data_daily.index
-)
-
-daily_positions = (
-    daily_index.searchsorted(
-        data_15m.index,
-        side="right"
-    )
-)
-
-
-# ============================================================
-# START
+# MAIN SIMULATION
 # ============================================================
 
 print()
-
 print(
     "Checking every 15 minutes..."
 )
-
 print(
-    "V8 MULTI-FACTOR ENGINE: ACTIVE"
+    "ONE OPEN TRADE AT A TIME: YES"
 )
-
+print(
+    "SAME-SETUP RE-ENTRY LOCK: YES"
+)
+print(
+    "DAILY LOOK-AHEAD PROTECTION: YES"
+)
 print()
-
 print(
     "Starting historical simulation...",
     flush=True
 )
 
 
-# ============================================================
-# STATE
-# ============================================================
-
-signals = []
-
-reasons = {}
-
-active_trade = None
+trades = []
 
 evaluations = 0
+
+i = MIN_15M_CANDLES
+
+# Number of consecutive no-signal candles required
+# before another setup can be taken.
+no_signal_bars = REARM_BARS
 
 total_iterations = (
     len(data_15m)
@@ -656,47 +388,30 @@ total_iterations = (
 
 
 # ============================================================
-# MAIN BACKTEST
+# CHRONOLOGICAL LOOP
 # ============================================================
 
-for i in range(
-    MIN_15M_CANDLES,
-    len(data_15m),
-    CHECK_EVERY
-):
+while i < len(data_15m):
 
     evaluations += 1
 
-    ts = timestamps[i]
+    timestamp = timestamps[i]
 
     # --------------------------------------------------------
-    # Existing trade
+    # ONLY USE COMPLETED DAILY CANDLES
+    #
+    # side="left" means today's incomplete daily candle
+    # is excluded from the strategy.
     # --------------------------------------------------------
 
-    if active_trade is not None:
-
-        exit_time = active_trade[
-            "exit_time"
-        ]
-
-        if (
-            exit_time is not None
-            and ts <= exit_time
-        ):
-
-            continue
-
-        active_trade = None
-
-    # --------------------------------------------------------
-    # Daily history
-    # --------------------------------------------------------
-
-    daily_end = (
-        daily_positions[i]
+    daily_end = data_daily.index.searchsorted(
+        timestamp,
+        side="left"
     )
 
     if daily_end < MIN_DAILY_CANDLES:
+
+        i += 1
         continue
 
     daily_start = max(
@@ -705,12 +420,14 @@ for i in range(
         - MAX_DAILY_CANDLES
     )
 
-    histdaily = data_daily.iloc[
-        daily_start:daily_end
-    ]
+    historical_daily = (
+        data_daily.iloc[
+            daily_start:daily_end
+        ]
+    )
 
     # --------------------------------------------------------
-    # 15M history
+    # 15M HISTORY
     # --------------------------------------------------------
 
     start_15m = max(
@@ -720,44 +437,36 @@ for i in range(
         + 1
     )
 
-    hist15 = data_15m.iloc[
-        start_15m:i + 1
-    ]
+    historical_15m = (
+        data_15m.iloc[
+            start_15m:i + 1
+        ]
+    )
 
     price = closes[i]
 
     # --------------------------------------------------------
-    # STRATEGY
+    # STRATEGY DECISION
     # --------------------------------------------------------
 
     try:
 
         signal = generate_signal(
-            hist15,
-            histdaily,
+            historical_15m,
+            historical_daily,
             price
         )
 
     except Exception as error:
 
-        reasons[
-            "STRATEGY_ERROR"
-        ] = (
-            reasons.get(
-                "STRATEGY_ERROR",
-                0
-            )
-            + 1
-        )
-
         print(
             "STRATEGY ERROR:",
-            ts,
-            "|",
+            timestamp,
             error,
             flush=True
         )
 
+        i += 1
         continue
 
     if not isinstance(
@@ -765,16 +474,7 @@ for i in range(
         dict
     ):
 
-        reasons[
-            "INVALID_SIGNAL_OBJECT"
-        ] = (
-            reasons.get(
-                "INVALID_SIGNAL_OBJECT",
-                0
-            )
-            + 1
-        )
-
+        i += 1
         continue
 
     direction = signal.get(
@@ -782,13 +482,8 @@ for i in range(
         "NONE"
     )
 
-    reason = signal.get(
-        "reason",
-        "UNKNOWN"
-    )
-
     # --------------------------------------------------------
-    # No signal
+    # NO SIGNAL
     # --------------------------------------------------------
 
     if direction not in (
@@ -796,31 +491,36 @@ for i in range(
         "SELL"
     ):
 
-        reasons[
-            reason
-        ] = (
-            reasons.get(
-                reason,
-                0
-            )
-            + 1
+        no_signal_bars = min(
+            REARM_BARS,
+            no_signal_bars + 1
         )
 
+        i += 1
         continue
 
     # --------------------------------------------------------
-    # Trade levels
+    # SAME-SETUP RE-ENTRY LOCK
     # --------------------------------------------------------
 
-    entry = safe_float(
+    if no_signal_bars < REARM_BARS:
+
+        i += 1
+        continue
+
+    # --------------------------------------------------------
+    # VALID TRADE LEVELS
+    # --------------------------------------------------------
+
+    entry = number(
         signal.get("entry")
     )
 
-    stop_loss = safe_float(
+    stop_loss = number(
         signal.get("stop_loss")
     )
 
-    take_profit = safe_float(
+    take_profit = number(
         signal.get("take_profit")
     )
 
@@ -830,40 +530,21 @@ for i in range(
         or take_profit is None
     ):
 
-        reasons[
-            "INVALID_TRADE_LEVELS"
-        ] = (
-            reasons.get(
-                "INVALID_TRADE_LEVELS",
-                0
-            )
-            + 1
-        )
-
+        i += 1
         continue
 
-    # --------------------------------------------------------
-    # Score
-    # --------------------------------------------------------
-
-    score = get_score(
-        signal
+    score = number(
+        signal.get("score")
     )
 
-    components = get_components(
-        signal
-    )
+    if score is None:
+        score = 0.0
 
     # --------------------------------------------------------
-    # Trade result
+    # FIND THE ACTUAL FUTURE EXIT
     # --------------------------------------------------------
 
-    (
-        result,
-        exit_price,
-        exit_time,
-        r_multiple
-    ) = fast_trade_result(
+    outcome = result_for_trade(
         direction,
         entry,
         stop_loss,
@@ -874,67 +555,49 @@ for i in range(
         timestamps
     )
 
-    # --------------------------------------------------------
-    # Setup ID
-    # --------------------------------------------------------
-
-    setup_id = (
-        f"{pd.Timestamp(ts).strftime('%Y%m%d-%H%M')}-"
-        f"{direction}-"
-        f"{i}"
-    )
-
     trade = {
 
-        "setup_id":
-            setup_id,
-
         "time":
-            pd.Timestamp(ts),
+            pd.Timestamp(timestamp),
 
-        "signal":
+        "direction":
             direction,
 
         "score":
-            score,
+            float(score),
 
         "entry":
-            entry,
+            float(entry),
 
         "sl":
-            stop_loss,
+            float(stop_loss),
 
         "tp":
-            take_profit,
+            float(take_profit),
 
         "result":
-            result,
+            outcome["result"],
 
         "r":
-            r_multiple,
-
-        "reason":
-            reason,
-
-        "components":
-            components,
+            outcome["r"],
 
         "exit_time":
-            exit_time,
+            outcome["exit_time"],
 
-        "exit_price":
-            exit_price
+        "components":
+            signal.get(
+                "components",
+                {}
+            )
     }
 
-    signals.append(
+    trades.append(
         trade
     )
 
-    active_trade = trade
-
     print(
         "SIGNAL FOUND:",
-        ts,
+        timestamp,
         "|",
         direction,
         "| Score:",
@@ -942,35 +605,54 @@ for i in range(
         "| Entry:",
         round(entry, 2),
         "| Result:",
-        result,
+        outcome["result"],
         "| R:",
-        round(r_multiple, 2),
+        round(
+            outcome["r"],
+            2
+        ),
         flush=True
     )
 
     # --------------------------------------------------------
-    # Progress
+    # CRITICAL:
+    #
+    # Jump directly to the candle AFTER the trade closes.
+    #
+    # This guarantees we cannot open another trade while
+    # the previous trade is still active.
     # --------------------------------------------------------
 
-    if (
-        evaluations % 5000 == 0
-    ):
+    exit_index = outcome[
+        "exit_index"
+    ]
 
-        progress = (
-            evaluations
-            / total_iterations
-            * 100
-        )
+    if exit_index is None:
 
-        print(
-            "Progress:",
-            f"{progress:.1f}%",
-            "| Checked:",
-            evaluations,
-            "| Signals:",
-            len(signals),
-            flush=True
-        )
+        break
+
+    i = (
+        exit_index
+        + 1
+    )
+
+    # --------------------------------------------------------
+    # RE-ARM LOCK
+    #
+    # Require a genuine period with no signal before another
+    # trade can be opened.
+    # --------------------------------------------------------
+
+    no_signal_bars = 0
+
+    # We don't count the exit candle as a fresh setup.
+    # The next REARM_BARS candles must pass without a signal.
+    rearm_until = min(
+        len(data_15m),
+        i + REARM_BARS
+    )
+
+    i = rearm_until
 
 
 # ============================================================
@@ -978,19 +660,9 @@ for i in range(
 # ============================================================
 
 print()
-
-print(
-    "=" * 60
-)
-
-print(
-    "BACKTEST COMPLETE"
-)
-
-print(
-    "=" * 60
-)
-
+print("=" * 60)
+print("BACKTEST COMPLETE")
+print("=" * 60)
 print()
 
 start = pd.Timestamp(
@@ -1008,46 +680,32 @@ days = (
 weeks = days / 7
 
 total = len(
-    signals
+    trades
 )
 
-buys = sum(
-    x["signal"] == "BUY"
-    for x in signals
-)
-
-sells = sum(
-    x["signal"] == "SELL"
-    for x in signals
-)
-
-tp_count = sum(
+wins = sum(
     x["result"] == "TP"
-    for x in signals
+    for x in trades
 )
 
-sl_count = sum(
+losses = sum(
     x["result"] == "SL"
-    for x in signals
+    for x in trades
 )
 
 ambiguous = sum(
     x["result"] == "AMBIGUOUS"
-    for x in signals
-)
-
-open_count = sum(
-    x["result"] == "OPEN"
-    for x in signals
+    for x in trades
 )
 
 resolved = (
-    tp_count
-    + sl_count
+    wins
+    + losses
+    + ambiguous
 )
 
 win_rate = (
-    tp_count
+    wins
     / resolved
     * 100
     if resolved
@@ -1056,18 +714,18 @@ win_rate = (
 
 total_r = sum(
     x["r"]
-    for x in signals
+    for x in trades
 )
 
 winning_r = sum(
     x["r"]
-    for x in signals
+    for x in trades
     if x["r"] > 0
 )
 
 losing_r = sum(
     x["r"]
-    for x in signals
+    for x in trades
     if x["r"] < 0
 )
 
@@ -1075,7 +733,7 @@ profit_factor = (
     winning_r
     / abs(losing_r)
     if losing_r < 0
-    else None
+    else 0
 )
 
 expectancy = (
@@ -1087,14 +745,14 @@ expectancy = (
 
 
 # ============================================================
-# MAX DRAWDOWN
+# DRAWDOWN
 # ============================================================
 
 equity = 0.0
 peak = 0.0
 max_drawdown = 0.0
 
-for trade in signals:
+for trade in trades:
 
     equity += trade["r"]
 
@@ -1114,56 +772,11 @@ for trade in signals:
 
 
 # ============================================================
-# LONGEST GAP
-# ============================================================
-
-if len(signals) >= 2:
-
-    signal_times = [
-        x["time"]
-        for x in signals
-    ]
-
-    longest_gap = max(
-        (
-            signal_times[i]
-            - signal_times[i - 1]
-        ).total_seconds()
-        / 86400
-        for i in range(
-            1,
-            len(signal_times)
-        )
-    )
-
-else:
-
-    longest_gap = None
-
-
-# ============================================================
-# SUMMARY
+# SCORE THRESHOLD ANALYSIS
 # ============================================================
 
 print(
-    "DATA SOURCE: DUKASCOPY"
-)
-
-print(
-    "SYMBOL: XAUUSD"
-)
-
-print(
-    "INSTRUMENT: GOLD SPOT"
-)
-
-print()
-
-print(
-    "TEST PERIOD:"
-)
-
-print(
+    "TEST PERIOD:",
     start,
     "->",
     end
@@ -1196,66 +809,26 @@ print(
     evaluations
 )
 
-print(
-    "CHECK INTERVAL: 15 minutes"
-)
-
-print(
-    "ONE OPEN TRADE AT A TIME: YES"
-)
-
 print()
 
 print(
-    "TOTAL V8 SIGNALS:",
+    "TOTAL INDEPENDENT TRADES:",
     total
 )
 
 print(
-    "BUY SIGNALS:",
-    buys
+    "WINS:",
+    wins
 )
 
 print(
-    "SELL SIGNALS:",
-    sells
-)
-
-print(
-    "SIGNALS PER WEEK:",
-    round(
-        total / weeks,
-        2
-    )
-    if weeks
-    else 0
-)
-
-print()
-
-print(
-    "TP:",
-    tp_count
-)
-
-print(
-    "SL:",
-    sl_count
+    "LOSSES:",
+    losses
 )
 
 print(
     "AMBIGUOUS:",
     ambiguous
-)
-
-print(
-    "OPEN:",
-    open_count
-)
-
-print(
-    "RESOLVED TRADES:",
-    resolved
 )
 
 print(
@@ -1266,8 +839,6 @@ print(
     ),
     "%"
 )
-
-print()
 
 print(
     "TOTAL R:",
@@ -1288,13 +859,9 @@ print(
 
 print(
     "PROFIT FACTOR:",
-    (
-        round(
-            profit_factor,
-            2
-        )
-        if profit_factor is not None
-        else "N/A"
+    round(
+        profit_factor,
+        2
     )
 )
 
@@ -1308,59 +875,155 @@ print(
 )
 
 print(
-    "LONGEST GAP BETWEEN SIGNALS:",
-    (
-        round(
-            longest_gap,
-            2
-        )
-        if longest_gap is not None
-        else "N/A"
-    ),
-    "days"
-    if longest_gap is not None
-    else ""
+    "TRADES PER WEEK:",
+    round(
+        total / weeks,
+        2
+    )
+    if weeks
+    else 0
 )
 
+print()
 
-# ============================================================
-# SCORE ANALYSIS
-# ============================================================
-
-print_score_analysis(
-    signals
-)
-
-
-# ============================================================
-# COMPONENT ANALYSIS
-# ============================================================
-
-print_component_analysis(
-    signals
-)
-
-
-# ============================================================
-# SIGNAL DETAILS
-# ============================================================
+print("=" * 60)
+print("SCORE THRESHOLD ANALYSIS")
+print("=" * 60)
 
 print()
 
 print(
-    "=" * 60
+    "THRESHOLD | TRADES | WINS | LOSSES | WIN RATE | TOTAL R"
 )
 
-print(
-    "V8 SIGNAL DETAILS"
-)
+print("-" * 60)
 
-print(
-    "=" * 60
-)
+for threshold in (
+    70,
+    75,
+    80,
+    85,
+    87,
+    90,
+    92,
+    95
+):
+
+    selected = [
+        trade
+        for trade in trades
+        if trade["score"] >= threshold
+        and trade["result"] in (
+            "TP",
+            "SL"
+        )
+    ]
+
+    count = len(
+        selected
+    )
+
+    threshold_wins = sum(
+        x["result"] == "TP"
+        for x in selected
+    )
+
+    threshold_losses = sum(
+        x["result"] == "SL"
+        for x in selected
+    )
+
+    threshold_r = sum(
+        x["r"]
+        for x in selected
+    )
+
+    threshold_win_rate = (
+        threshold_wins
+        / count
+        * 100
+        if count
+        else 0
+    )
+
+    print(
+        f"{threshold:9d} | "
+        f"{count:6d} | "
+        f"{threshold_wins:4d} | "
+        f"{threshold_losses:6d} | "
+        f"{threshold_win_rate:8.2f}% | "
+        f"{threshold_r:7.2f}"
+    )
+
+
+# ============================================================
+# SCORE BUCKETS
+# ============================================================
+
+print()
+print("=" * 60)
+print("SCORE BUCKETS")
+print("=" * 60)
+
+for low, high in (
+    (70, 74),
+    (75, 79),
+    (80, 84),
+    (85, 89),
+    (90, 94),
+    (95, 100)
+):
+
+    selected = [
+        trade
+        for trade in trades
+        if low
+        <= trade["score"]
+        <= high
+        and trade["result"] in (
+            "TP",
+            "SL"
+        )
+    ]
+
+    if not selected:
+        continue
+
+    bucket_wins = sum(
+        x["result"] == "TP"
+        for x in selected
+    )
+
+    bucket_win_rate = (
+        bucket_wins
+        / len(selected)
+        * 100
+    )
+
+    bucket_r = sum(
+        x["r"]
+        for x in selected
+    )
+
+    print(
+        f"{low}-{high}: "
+        f"{len(selected)} trades | "
+        f"{bucket_win_rate:.2f}% win rate | "
+        f"{bucket_r:.2f}R"
+    )
+
+
+# ============================================================
+# TRADE LOG
+# ============================================================
+
+print()
+print("=" * 60)
+print("INDEPENDENT TRADE LOG")
+print("=" * 60)
 
 for number, trade in enumerate(
-    signals,
+    trades,
     1
 ):
 
@@ -1369,24 +1032,16 @@ for number, trade in enumerate(
     print(
         number,
         "|",
-        trade["setup_id"]
-    )
-
-    print(
-        "Time:",
-        trade["time"]
-    )
-
-    print(
-        "Signal:",
-        trade["signal"]
+        trade["time"],
+        "|",
+        trade["direction"]
     )
 
     print(
         "Score:",
         round(
             trade["score"],
-            2
+            1
         )
     )
 
@@ -1428,37 +1083,12 @@ for number, trade in enumerate(
     )
 
     print(
-        "Reason:",
-        trade["reason"]
+        "Exit:",
+        trade["exit_time"]
     )
 
-    print(
-        "Components:",
-        trade["components"]
-    )
-
-    if trade["exit_time"] is not None:
-
-        print(
-            "Exit:",
-            trade["exit_time"]
-        )
-
-
-# ============================================================
-# END
-# ============================================================
 
 print()
-
-print(
-    "=" * 60
-)
-
-print(
-    "END OF V8 BACKTEST"
-)
-
-print(
-    "=" * 60
-)
+print("=" * 60)
+print("END OF V8.1 BACKTEST")
+print("=" * 60)
