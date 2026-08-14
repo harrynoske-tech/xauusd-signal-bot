@@ -7,7 +7,7 @@ from dukascopy_python import instruments
 
 
 # ============================================================
-# DUKASCOPY HISTORICAL DATA DOWNLOADER
+# DUKASCOPY XAUUSD HISTORICAL DATA DOWNLOADER
 # ============================================================
 
 OUTPUT_DIR = "data"
@@ -17,90 +17,128 @@ END_DATE = datetime.now()
 
 OFFER_SIDE = dukascopy_python.OFFER_SIDE_BID
 
-
-# ============================================================
-# FIND XAUUSD INSTRUMENT
-# ============================================================
-
-def find_xauusd():
-
-    candidates = [
-        name
-        for name in dir(instruments)
-        if "XAU" in name.upper()
-        or "GOLD" in name.upper()
-    ]
-
-    print(
-        "Available XAU/GOLD instruments:",
-        candidates
-    )
-
-    for name in candidates:
-
-        value = getattr(
-            instruments,
-            name
-        )
-
-        if "XAUUSD" in name.upper():
-
-            print(
-                "Using instrument:",
-                name
-            )
-
-            return value
-
-    raise RuntimeError(
-        "Could not find XAUUSD in dukascopy_python."
-    )
+XAUUSD = instruments.INSTRUMENT_FX_METALS_XAU_USD
 
 
 # ============================================================
-# DOWNLOAD
+# DOWNLOAD FUNCTION
 # ============================================================
 
-def download(
-    instrument,
+def download_data(
     interval,
-    start_date,
-    end_date,
     filename
 ):
 
     print()
+    print("=" * 60)
     print(
-        "Downloading:",
-        filename,
+        "DOWNLOADING:",
+        filename
+    )
+    print("=" * 60)
+
+    print(
+        "Instrument: XAU/USD"
+    )
+
+    print(
+        "Start:",
+        START_DATE
+    )
+
+    print(
+        "End:",
+        END_DATE
+    )
+
+    print(
+        "Interval:",
+        interval
+    )
+
+    print()
+
+    print(
+        "Requesting Dukascopy data...",
         flush=True
     )
 
     data = dukascopy_python.fetch(
-        instrument,
+        XAUUSD,
         interval,
         OFFER_SIDE,
-        start_date,
-        end_date,
+        START_DATE,
+        END_DATE,
     )
 
-    if data is None or data.empty:
+    if data is None:
 
         raise RuntimeError(
-            f"No data returned for {filename}"
+            "Dukascopy returned None."
         )
+
+    if data.empty:
+
+        raise RuntimeError(
+            "Dukascopy returned zero candles."
+        )
+
+    print(
+        "Raw candles received:",
+        len(data),
+        flush=True
+    )
+
+    # --------------------------------------------------------
+    # Clean data
+    # --------------------------------------------------------
 
     data = data.copy()
 
-    data.columns = [
-        str(column).capitalize()
-        for column in data.columns
-    ]
+    data.index = pd.to_datetime(
+        data.index
+    )
 
     data = (
         data
         .sort_index()
         .drop_duplicates()
+    )
+
+    # Standardise column names
+    data.columns = [
+        str(column).capitalize()
+        for column in data.columns
+    ]
+
+    # --------------------------------------------------------
+    # Make sure OHLC exists
+    # --------------------------------------------------------
+
+    required_columns = [
+        "Open",
+        "High",
+        "Low",
+        "Close"
+    ]
+
+    for column in required_columns:
+
+        if column not in data.columns:
+
+            raise RuntimeError(
+                f"Missing required column: {column}. "
+                f"Columns received: "
+                f"{list(data.columns)}"
+            )
+
+    # --------------------------------------------------------
+    # Save
+    # --------------------------------------------------------
+
+    os.makedirs(
+        OUTPUT_DIR,
+        exist_ok=True
     )
 
     output_path = os.path.join(
@@ -112,25 +150,41 @@ def download(
         output_path
     )
 
+    print()
     print(
-        "Candles:",
+        "CANDLES:",
         len(data)
     )
 
     print(
-        "First:",
+        "FIRST:",
         data.index.min()
     )
 
     print(
-        "Last:",
+        "LAST:",
         data.index.max()
     )
 
     print(
-        "Saved:",
+        "COLUMNS:",
+        list(data.columns)
+    )
+
+    print(
+        "SAVED:",
         output_path,
         flush=True
+    )
+
+    print()
+
+    print(
+        "LATEST 5 CANDLES:"
+    )
+
+    print(
+        data.tail(5)
     )
 
     return data
@@ -146,47 +200,104 @@ def main():
     print("=" * 60)
     print("DUKASCOPY XAUUSD DATA DOWNLOADER")
     print("=" * 60)
+    print()
 
     print(
-        "Start:",
+        "DATA SOURCE: DUKASCOPY"
+    )
+
+    print(
+        "SYMBOL: XAUUSD"
+    )
+
+    print(
+        "INSTRUMENT:",
+        XAUUSD
+    )
+
+    print(
+        "START:",
         START_DATE
     )
 
     print(
-        "End:",
+        "END:",
         END_DATE
     )
 
-    os.makedirs(
-        OUTPUT_DIR,
-        exist_ok=True
-    )
+    # --------------------------------------------------------
+    # 15 MINUTE DATA
+    # --------------------------------------------------------
 
-    instrument = find_xauusd()
-
-    # 15-minute data
-    download(
-        instrument,
+    data_15m = download_data(
         dukascopy_python.INTERVAL_MINUTE_15,
-        START_DATE,
-        END_DATE,
-        "XAUUSD_15m.csv",
+        "XAUUSD_15m.csv"
     )
 
-    # Daily data
-    download(
-        instrument,
+    # --------------------------------------------------------
+    # DAILY DATA
+    # --------------------------------------------------------
+
+    data_daily = download_data(
         dukascopy_python.INTERVAL_DAY_1,
-        START_DATE,
-        END_DATE,
-        "XAUUSD_1d.csv",
+        "XAUUSD_1d.csv"
+    )
+
+    # --------------------------------------------------------
+    # Final verification
+    # --------------------------------------------------------
+
+    print()
+    print("=" * 60)
+    print("DOWNLOAD COMPLETE")
+    print("=" * 60)
+
+    print()
+
+    print(
+        "15M CANDLES:",
+        len(data_15m)
+    )
+
+    print(
+        "DAILY CANDLES:",
+        len(data_daily)
+    )
+
+    print()
+
+    print(
+        "15M:",
+        data_15m.index.min(),
+        "->",
+        data_15m.index.max()
+    )
+
+    print(
+        "DAILY:",
+        data_daily.index.min(),
+        "->",
+        data_daily.index.max()
+    )
+
+    print()
+
+    print(
+        "Files created:"
+    )
+
+    print(
+        "  data/XAUUSD_15m.csv"
+    )
+
+    print(
+        "  data/XAUUSD_1d.csv"
     )
 
     print()
     print("=" * 60)
-    print("DUKASCOPY DOWNLOAD COMPLETE")
-    print("=" * 60)
 
 
 if __name__ == "__main__":
+
     main()
