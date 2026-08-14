@@ -21,6 +21,12 @@ jobs:
         run: |
           pip install requests pandas yfinance curl_cffi
 
+      - name: Test FCS API
+        env:
+          FCS_API_KEY: ${{ secrets.FCS_API_KEY }}
+        run: |
+          python fcs_test.py
+
       - name: Run backtest
         run: |
           python backtest.py
