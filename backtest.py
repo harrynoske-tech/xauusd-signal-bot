@@ -2,26 +2,26 @@ import os
 import numpy as np
 import pandas as pd
 
-from strategy import generate_signal
+from strategy_v8 import generate_signal
 
 
 # ============================================================
-# XAUUSD STRATEGY BACKTEST V7.1
-# OPTIMISED DUKASCOPY ENGINE
+# XAUUSD STRATEGY BACKTEST V8.0
+# MULTI-FACTOR RESEARCH ENGINE
 # ============================================================
 
 DATA_15M = "data/XAUUSD_15m.csv"
 DATA_DAILY = "data/XAUUSD_1d.csv"
 
 MIN_15M_CANDLES = 300
-MAX_15M_CANDLES = 1000
-MAX_DAILY_CANDLES = 500
 MIN_DAILY_CANDLES = 100
-
-RESET_DISTANCE = 10.0
 
 # Evaluate every completed 15-minute candle.
 CHECK_EVERY = 1
+
+# Maximum historical windows passed into strategy_v8.
+MAX_15M_CANDLES = 1000
+MAX_DAILY_CANDLES = 500
 
 
 # ============================================================
@@ -32,7 +32,7 @@ def load_data():
 
     print()
     print("=" * 60)
-    print("XAUUSD STRATEGY BACKTEST V7.1")
+    print("XAUUSD STRATEGY BACKTEST V8.0")
     print("=" * 60)
     print()
 
@@ -66,16 +66,24 @@ def load_data():
     data_15m = (
         data_15m
         .sort_index()
-        .loc[~data_15m.index.duplicated(keep="last")]
+        .loc[
+            ~data_15m.index.duplicated(
+                keep="last"
+            )
+        ]
     )
 
     data_daily = (
         data_daily
         .sort_index()
-        .loc[~data_daily.index.duplicated(keep="last")]
+        .loc[
+            ~data_daily.index.duplicated(
+                keep="last"
+            )
+        ]
     )
 
-    # Standardise columns.
+    # Standardise OHLC names.
     data_15m.columns = [
         str(c).capitalize()
         for c in data_15m.columns
@@ -104,6 +112,27 @@ def load_data():
             raise RuntimeError(
                 f"Daily data missing column: {column}"
             )
+
+    # Ensure numeric OHLC.
+    for column in required:
+
+        data_15m[column] = pd.to_numeric(
+            data_15m[column],
+            errors="coerce"
+        )
+
+        data_daily[column] = pd.to_numeric(
+            data_daily[column],
+            errors="coerce"
+        )
+
+    data_15m = data_15m.dropna(
+        subset=required
+    )
+
+    data_daily = data_daily.dropna(
+        subset=required
+    )
 
     print(
         "15m candles:",
@@ -158,97 +187,36 @@ def safe_float(value):
         return None
 
 
-def get_aoi(signal):
+def get_score(signal):
 
-    aoi = signal.get("aoi")
-
-    if isinstance(aoi, dict):
-        return aoi
-
-    return None
-
-
-def setup_key(signal):
-
-    aoi = get_aoi(signal)
-
-    if not aoi:
-        return None
-
-    low = safe_float(
-        aoi.get("low")
+    score = safe_float(
+        signal.get("score")
     )
 
-    high = safe_float(
-        aoi.get("high")
+    if score is None:
+        return 0.0
+
+    return score
+
+
+def get_components(signal):
+
+    components = signal.get(
+        "components",
+        {}
     )
 
-    if low is None or high is None:
-        return None
+    if not isinstance(
+        components,
+        dict
+    ):
+        return {}
 
-    return (
-        aoi.get(
-            "timeframe",
-            "UNKNOWN"
-        ),
-        aoi.get(
-            "type",
-            "UNKNOWN"
-        ),
-        round(low, 1),
-        round(high, 1)
-    )
-
-
-def setup_text(signal):
-
-    key = setup_key(signal)
-
-    if not key:
-        return "UNKNOWN_SETUP"
-
-    tf, typ, low, high = key
-
-    return (
-        f"{str(tf).upper()} "
-        f"{str(typ).upper()} "
-        f"{low}-{high}"
-    )
-
-
-def aoi_reset(price, aoi):
-
-    if not isinstance(aoi, dict):
-        return True
-
-    low = safe_float(
-        aoi.get("low")
-    )
-
-    high = safe_float(
-        aoi.get("high")
-    )
-
-    if low is None or high is None:
-        return True
-
-    if low <= price <= high:
-        return False
-
-    if price > high:
-        return (
-            price - high
-            >= RESET_DISTANCE
-        )
-
-    return (
-        low - price
-        >= RESET_DISTANCE
-    )
+    return components
 
 
 # ============================================================
-# FAST TRADE RESULT
+# TRADE RESULT
 # ============================================================
 
 def fast_trade_result(
@@ -261,11 +229,6 @@ def fast_trade_result(
     lows,
     timestamps
 ):
-
-    """
-    Same TP/SL logic as before, but uses NumPy arrays
-    instead of iterating through pandas rows.
-    """
 
     if start_index >= len(highs):
 
@@ -328,7 +291,7 @@ def fast_trade_result(
         else None
     )
 
-    # Nothing hit.
+    # Neither level hit.
     if (
         first_stop is None
         and first_target is None
@@ -341,7 +304,9 @@ def fast_trade_result(
             0.0
         )
 
-    # Both happen on the same candle.
+    # Both hit during the same candle.
+    # Conservative assumption:
+    # treat as ambiguous.
     if (
         first_stop is not None
         and first_target is not None
@@ -359,7 +324,7 @@ def fast_trade_result(
             0.0
         )
 
-    # Stop first.
+    # Stop hit first.
     if (
         first_target is None
         or (
@@ -379,7 +344,7 @@ def fast_trade_result(
             -1.0
         )
 
-    # Target first.
+    # Target hit first.
     position = first_target
 
     risk = abs(
@@ -407,6 +372,203 @@ def fast_trade_result(
 
 
 # ============================================================
+# RESULT STATISTICS
+# ============================================================
+
+def print_score_analysis(signals):
+
+    print()
+    print("=" * 60)
+    print("V8 SCORE ANALYSIS")
+    print("=" * 60)
+
+    if not signals:
+
+        print("No signals.")
+        return
+
+    thresholds = [
+        60,
+        65,
+        70,
+        75,
+        80,
+        85,
+        90,
+        95
+    ]
+
+    print()
+    print(
+        "THRESHOLD | TRADES | WINS | LOSSES | WIN RATE | TOTAL R"
+    )
+    print("-" * 60)
+
+    for threshold in thresholds:
+
+        trades = [
+            x
+            for x in signals
+            if x["score"] >= threshold
+            and x["result"] in (
+                "TP",
+                "SL"
+            )
+        ]
+
+        total = len(trades)
+
+        wins = sum(
+            x["result"] == "TP"
+            for x in trades
+        )
+
+        losses = sum(
+            x["result"] == "SL"
+            for x in trades
+        )
+
+        total_r = sum(
+            x["r"]
+            for x in trades
+        )
+
+        win_rate = (
+            wins / total * 100
+            if total
+            else 0
+        )
+
+        print(
+            f"{threshold:9.0f} | "
+            f"{total:6d} | "
+            f"{wins:4d} | "
+            f"{losses:6d} | "
+            f"{win_rate:8.2f}% | "
+            f"{total_r:7.2f}"
+        )
+
+    print()
+    print(
+        "IMPORTANT: Higher thresholds reduce trade frequency."
+    )
+
+
+def print_component_analysis(signals):
+
+    print()
+    print("=" * 60)
+    print("V8 COMPONENT ANALYSIS")
+    print("=" * 60)
+
+    if not signals:
+        return
+
+    components = [
+        "trend",
+        "momentum",
+        "breakout",
+        "daily",
+        "htf",
+        "volatility",
+        "session"
+    ]
+
+    for component_name in components:
+
+        component_trades = []
+
+        for trade in signals:
+
+            component = trade[
+                "components"
+            ].get(
+                component_name
+            )
+
+            if not isinstance(
+                component,
+                dict
+            ):
+                continue
+
+            component_trades.append(
+                (
+                    trade,
+                    component
+                )
+            )
+
+        if not component_trades:
+            continue
+
+        print()
+        print(
+            component_name.upper()
+        )
+
+        directional = {
+            "BUY": [],
+            "SELL": [],
+            "NONE": []
+        }
+
+        for trade, component in component_trades:
+
+            direction = component.get(
+                "direction",
+                "NONE"
+            )
+
+            if direction not in directional:
+                direction = "NONE"
+
+            directional[
+                direction
+            ].append(trade)
+
+        for direction, trades in directional.items():
+
+            if not trades:
+                continue
+
+            resolved = [
+                x
+                for x in trades
+                if x["result"] in (
+                    "TP",
+                    "SL"
+                )
+            ]
+
+            if not resolved:
+                continue
+
+            wins = sum(
+                x["result"] == "TP"
+                for x in resolved
+            )
+
+            win_rate = (
+                wins
+                / len(resolved)
+                * 100
+            )
+
+            total_r = sum(
+                x["r"]
+                for x in resolved
+            )
+
+            print(
+                f"  {direction:5s} | "
+                f"Trades: {len(resolved):4d} | "
+                f"Win: {win_rate:6.2f}% | "
+                f"R: {total_r:7.2f}"
+            )
+
+
+# ============================================================
 # LOAD
 # ============================================================
 
@@ -417,38 +579,36 @@ data_15m, data_daily = load_data()
 # PRE-COMPUTE ARRAYS
 # ============================================================
 
-timestamps = data_15m.index.to_numpy()
+timestamps = (
+    data_15m.index.to_numpy()
+)
 
 highs = (
     data_15m["High"]
-    .to_numpy(
-        dtype=float
-    )
+    .to_numpy(dtype=float)
 )
 
 lows = (
     data_15m["Low"]
-    .to_numpy(
-        dtype=float
-    )
+    .to_numpy(dtype=float)
 )
 
 closes = (
     data_15m["Close"]
-    .to_numpy(
-        dtype=float
-    )
+    .to_numpy(dtype=float)
 )
+
+
+# ============================================================
+# DAILY POSITION LOOKUP
+# ============================================================
 
 daily_index = (
     data_daily.index
 )
 
-# Pre-compute the daily candle position corresponding
-# to every 15M timestamp.
 daily_positions = (
-    daily_index
-    .searchsorted(
+    daily_index.searchsorted(
         data_15m.index,
         side="right"
     )
@@ -466,11 +626,7 @@ print(
 )
 
 print(
-    "One open trade at a time: YES"
-)
-
-print(
-    "Same-AOI re-entry lock: YES"
+    "V8 MULTI-FACTOR ENGINE: ACTIVE"
 )
 
 print()
@@ -490,13 +646,6 @@ signals = []
 reasons = {}
 
 active_trade = None
-
-locked_key = None
-locked_aoi = None
-
-blocked_open = 0
-blocked_duplicate = 0
-blocked_lock = 0
 
 evaluations = 0
 
@@ -535,14 +684,12 @@ for i in range(
             and ts <= exit_time
         ):
 
-            blocked_open += 1
-
             continue
 
         active_trade = None
 
     # --------------------------------------------------------
-    # Fast daily position lookup
+    # Daily history
     # --------------------------------------------------------
 
     daily_end = (
@@ -550,7 +697,6 @@ for i in range(
     )
 
     if daily_end < MIN_DAILY_CANDLES:
-
         continue
 
     daily_start = max(
@@ -564,17 +710,14 @@ for i in range(
     ]
 
     # --------------------------------------------------------
-    # 15M historical window
-    #
-    # IMPORTANT:
-    # No .copy()
-    # This avoids creating a new 1000-row DataFrame
-    # unnecessarily on every iteration.
+    # 15M history
     # --------------------------------------------------------
 
     start_15m = max(
         0,
-        i - MAX_15M_CANDLES + 1
+        i
+        - MAX_15M_CANDLES
+        + 1
     )
 
     hist15 = data_15m.iloc[
@@ -582,27 +725,6 @@ for i in range(
     ]
 
     price = closes[i]
-
-    # --------------------------------------------------------
-    # AOI LOCK
-    # --------------------------------------------------------
-
-    if (
-        locked_key is not None
-        and locked_aoi is not None
-    ):
-
-        if aoi_reset(
-            price,
-            locked_aoi
-        ):
-
-            locked_key = None
-            locked_aoi = None
-
-        else:
-
-            blocked_lock += 1
 
     # --------------------------------------------------------
     # STRATEGY
@@ -624,7 +746,8 @@ for i in range(
             reasons.get(
                 "STRATEGY_ERROR",
                 0
-            ) + 1
+            )
+            + 1
         )
 
         print(
@@ -648,7 +771,8 @@ for i in range(
             reasons.get(
                 "INVALID_SIGNAL_OBJECT",
                 0
-            ) + 1
+            )
+            + 1
         )
 
         continue
@@ -663,6 +787,10 @@ for i in range(
         "UNKNOWN"
     )
 
+    # --------------------------------------------------------
+    # No signal
+    # --------------------------------------------------------
+
     if direction not in (
         "BUY",
         "SELL"
@@ -674,10 +802,15 @@ for i in range(
             reasons.get(
                 reason,
                 0
-            ) + 1
+            )
+            + 1
         )
 
         continue
+
+    # --------------------------------------------------------
+    # Trade levels
+    # --------------------------------------------------------
 
     entry = safe_float(
         signal.get("entry")
@@ -703,42 +836,26 @@ for i in range(
             reasons.get(
                 "INVALID_TRADE_LEVELS",
                 0
-            ) + 1
+            )
+            + 1
         )
 
         continue
 
     # --------------------------------------------------------
-    # AOI
+    # Score
     # --------------------------------------------------------
 
-    key = setup_key(
+    score = get_score(
         signal
     )
 
-    aoi = get_aoi(
+    components = get_components(
         signal
     )
 
     # --------------------------------------------------------
-    # Same-AOI re-entry lock
-    # --------------------------------------------------------
-
-    if (
-        locked_key is not None
-        and key == locked_key
-        and not aoi_reset(
-            price,
-            locked_aoi
-        )
-    ):
-
-        blocked_duplicate += 1
-
-        continue
-
-    # --------------------------------------------------------
-    # TRADE RESULT
+    # Trade result
     # --------------------------------------------------------
 
     (
@@ -758,82 +875,60 @@ for i in range(
     )
 
     # --------------------------------------------------------
-    # Bias
+    # Setup ID
     # --------------------------------------------------------
-
-    bias = signal.get(
-        "bias",
-        {}
-    )
-
-    if not isinstance(
-        bias,
-        dict
-    ):
-
-        bias = {}
 
     setup_id = (
         f"{pd.Timestamp(ts).strftime('%Y%m%d-%H%M')}-"
         f"{direction}-"
-        f"{abs(hash(str(key))) % 100000:05d}"
+        f"{i}"
     )
 
     trade = {
 
-        "setup_id": setup_id,
+        "setup_id":
+            setup_id,
 
-        "time": pd.Timestamp(ts),
+        "time":
+            pd.Timestamp(ts),
 
-        "signal": direction,
+        "signal":
+            direction,
 
-        "entry": entry,
+        "score":
+            score,
 
-        "sl": stop_loss,
+        "entry":
+            entry,
 
-        "tp": take_profit,
+        "sl":
+            stop_loss,
 
-        "result": result,
+        "tp":
+            take_profit,
 
-        "r": r_multiple,
+        "result":
+            result,
 
-        "reason": reason,
+        "r":
+            r_multiple,
 
-        "setup": setup_text(
-            signal
-        ),
+        "reason":
+            reason,
 
-        "weekly": bias.get(
-            "weekly",
-            "UNKNOWN"
-        ),
+        "components":
+            components,
 
-        "daily": bias.get(
-            "daily",
-            "UNKNOWN"
-        ),
+        "exit_time":
+            exit_time,
 
-        "4h": bias.get(
-            "4h",
-            "UNKNOWN"
-        ),
-
-        "overall": bias.get(
-            "overall",
-            "UNKNOWN"
-        ),
-
-        "exit_time": exit_time,
-
-        "exit_price": exit_price
+        "exit_price":
+            exit_price
     }
 
     signals.append(
         trade
     )
-
-    locked_key = key
-    locked_aoi = aoi
 
     active_trade = trade
 
@@ -842,22 +937,14 @@ for i in range(
         ts,
         "|",
         direction,
+        "| Score:",
+        round(score, 1),
         "| Entry:",
-        round(
-            entry,
-            2
-        ),
+        round(entry, 2),
         "| Result:",
         result,
         "| R:",
-        round(
-            r_multiple,
-            2
-        ),
-        "| Setup:",
-        trade[
-            "setup"
-        ],
+        round(r_multiple, 2),
         flush=True
     )
 
@@ -866,7 +953,7 @@ for i in range(
     # --------------------------------------------------------
 
     if (
-        evaluations % 2500 == 0
+        evaluations % 5000 == 0
     ):
 
         progress = (
@@ -1043,7 +1130,6 @@ if len(signals) >= 2:
             - signal_times[i - 1]
         ).total_seconds()
         / 86400
-
         for i in range(
             1,
             len(signal_times)
@@ -1085,18 +1171,12 @@ print(
 
 print(
     "DAYS TESTED:",
-    round(
-        days,
-        1
-    )
+    round(days, 1)
 )
 
 print(
     "WEEKS TESTED:",
-    round(
-        weeks,
-        1
-    )
+    round(weeks, 1)
 )
 
 print()
@@ -1124,29 +1204,25 @@ print(
     "ONE OPEN TRADE AT A TIME: YES"
 )
 
-print(
-    "SAME-AOI RESET LOCK: YES"
-)
-
 print()
 
 print(
-    "TOTAL INDEPENDENT SETUPS:",
+    "TOTAL V8 SIGNALS:",
     total
 )
 
 print(
-    "BUY SETUPS:",
+    "BUY SIGNALS:",
     buys
 )
 
 print(
-    "SELL SETUPS:",
+    "SELL SIGNALS:",
     sells
 )
 
 print(
-    "SETUPS PER WEEK:",
+    "SIGNALS PER WEEK:",
     round(
         total / weeks,
         2
@@ -1232,8 +1308,7 @@ print(
 )
 
 print(
-    "LONGEST GAP BETWEEN "
-    "INDEPENDENT SETUPS:",
+    "LONGEST GAP BETWEEN SIGNALS:",
     (
         round(
             longest_gap,
@@ -1249,7 +1324,25 @@ print(
 
 
 # ============================================================
-# ACCOUNTING
+# SCORE ANALYSIS
+# ============================================================
+
+print_score_analysis(
+    signals
+)
+
+
+# ============================================================
+# COMPONENT ANALYSIS
+# ============================================================
+
+print_component_analysis(
+    signals
+)
+
+
+# ============================================================
+# SIGNAL DETAILS
 # ============================================================
 
 print()
@@ -1259,85 +1352,12 @@ print(
 )
 
 print(
-    "BACKTEST ACCOUNTING"
+    "V8 SIGNAL DETAILS"
 )
 
 print(
     "=" * 60
 )
-
-print(
-    "Evaluations blocked while trade open:",
-    blocked_open
-)
-
-print(
-    "Repeated same-AOI signals blocked:",
-    blocked_duplicate
-)
-
-print(
-    "Evaluations inside locked AOI:",
-    blocked_lock
-)
-
-
-# ============================================================
-# REJECTION REASONS
-# ============================================================
-
-if reasons:
-
-    print()
-
-    print(
-        "=" * 60
-    )
-
-    print(
-        "TOP SIGNAL REJECTION REASONS"
-    )
-
-    print(
-        "=" * 60
-    )
-
-    for reason, count in sorted(
-        reasons.items(),
-        key=lambda x: x[1],
-        reverse=True
-    )[:20]:
-
-        print(
-            reason,
-            ":",
-            count
-        )
-
-
-# ============================================================
-# INDIVIDUAL SIGNALS
-# ============================================================
-
-print()
-
-print(
-    "=" * 60
-)
-
-print(
-    "INDEPENDENT SETUPS"
-)
-
-print(
-    "=" * 60
-)
-
-if not signals:
-
-    print(
-        "NO INDEPENDENT SETUPS FOUND."
-    )
 
 for number, trade in enumerate(
     signals,
@@ -1358,13 +1378,16 @@ for number, trade in enumerate(
     )
 
     print(
-        "Setup:",
-        trade["setup"]
+        "Signal:",
+        trade["signal"]
     )
 
     print(
-        "Signal:",
-        trade["signal"]
+        "Score:",
+        round(
+            trade["score"],
+            2
+        )
     )
 
     print(
@@ -1410,23 +1433,8 @@ for number, trade in enumerate(
     )
 
     print(
-        "Weekly Bias:",
-        trade["weekly"]
-    )
-
-    print(
-        "Daily Bias:",
-        trade["daily"]
-    )
-
-    print(
-        "4H Bias:",
-        trade["4h"]
-    )
-
-    print(
-        "Overall Bias:",
-        trade["overall"]
+        "Components:",
+        trade["components"]
     )
 
     if trade["exit_time"] is not None:
@@ -1437,6 +1445,10 @@ for number, trade in enumerate(
         )
 
 
+# ============================================================
+# END
+# ============================================================
+
 print()
 
 print(
@@ -1444,7 +1456,7 @@ print(
 )
 
 print(
-    "END OF BACKTEST"
+    "END OF V8 BACKTEST"
 )
 
 print(
