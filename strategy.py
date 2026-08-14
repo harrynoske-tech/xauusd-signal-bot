@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 
-# XAUUSD STRATEGY V5 - Structure + Liquidity + AOI + Confirmation
+# XAUUSD STRATEGY V6 - SDMC: Supply/Demand + Liquidity + BOS/CHOCH + Confirmation
 # Public interfaces preserved for live.py/backtest.py.
 
 MIN_TOUCHES = 2
@@ -11,7 +11,7 @@ WEEKLY_LOOKBACK = 60
 DAILY_SWING = 3
 WEEKLY_SWING = 2
 ATR_PERIOD = 14
-AOI_TOLERANCE = 5.0
+AOI_TOLERANCE = 8.0
 MAX_RELEVANT_AOI_DISTANCE = 180.0
 CONFIRM_LOOKBACK = 12
 MAX_BARS_AFTER_SWEEP = 5
@@ -21,9 +21,9 @@ BREAK_BUFFER_ATR = 0.05
 SL_ATR_BUFFER = 0.20
 MIN_STOP_DISTANCE = 4.0
 MAX_STOP_DISTANCE = 55.0
-RISK_REWARD = 2.0
+RISK_REWARD = 3.0
 ACTIVE_START_UTC = 6
-ACTIVE_END_UTC = 18
+ACTIVE_END_UTC = 20
 
 
 def _clean(data):
@@ -134,21 +134,26 @@ def get_higher_timeframe_bias(data_15m, data_daily):
     weekly_bias = get_market_bias(weekly)
     daily_bias = get_market_bias(dd)
     four_h_bias = get_market_bias(four_h)
-    score = 0
-    for value, weight in ((weekly_bias, 3), (daily_bias, 3), (four_h_bias, 1)):
-        if value == "BULLISH": score += weight
-        elif value == "BEARISH": score -= weight
-    if score >= 5:
+
+    # Daily is primary direction; Weekly is context; 4H is execution filter.
+    if daily_bias == "BULLISH" and four_h_bias != "BEARISH":
         overall = "BULLISH"
-    elif score <= -5:
+    elif daily_bias == "BEARISH" and four_h_bias != "BULLISH":
         overall = "BEARISH"
-    elif daily_bias == "BULLISH" and four_h_bias == "BULLISH":
+    elif weekly_bias == "BULLISH" and four_h_bias == "BULLISH":
         overall = "BULLISH"
-    elif daily_bias == "BEARISH" and four_h_bias == "BEARISH":
+    elif weekly_bias == "BEARISH" and four_h_bias == "BEARISH":
         overall = "BEARISH"
     else:
         overall = "NEUTRAL"
+
+    score = 0
+    for value, weight in ((weekly_bias, 1), (daily_bias, 3), (four_h_bias, 2)):
+        if value == "BULLISH": score += weight
+        elif value == "BEARISH": score -= weight
+
     return {"weekly":weekly_bias, "daily":daily_bias, "4h":four_h_bias, "overall":overall, "score":score}
+
 
 
 def _cluster(values):
@@ -367,6 +372,48 @@ def get_entry_confirmation(data, aoi=None):
     return direction if confirmation is not None else "NONE"
 
 
+def _find_recent_fvg(data, direction, lookback=8):
+    df = _completed(data).tail(lookback + 2)
+    if len(df) < 3:
+        return None
+    for i in range(len(df) - 1, 1, -1):
+        a = df.iloc[i-2]
+        c = df.iloc[i]
+        if direction == "BUY" and float(c["Low"]) > float(a["High"]):
+            return {"low":float(a["High"]), "high":float(c["Low"]), "index":df.index[i]}
+        if direction == "SELL" and float(c["High"]) < float(a["Low"]):
+            return {"low":float(c["High"]), "high":float(a["Low"]), "index":df.index[i]}
+    return None
+
+
+def _find_recent_order_block(data, direction, lookback=8):
+    df = _completed(data).tail(lookback + 4)
+    atr = _atr(df)
+    if len(df) < 4 or atr is None:
+        return None
+    for i in range(len(df) - 1, 1, -1):
+        candle = df.iloc[i]
+        previous = df.iloc[i-1]
+        body = abs(float(candle["Close"]) - float(candle["Open"]))
+        if direction == "BUY" and float(previous["Close"]) < float(previous["Open"]) and float(candle["Close"]) > float(candle["Open"]) and body >= atr * 0.8:
+            return {"low":float(previous["Low"]), "high":float(previous["High"]), "index":df.index[i-1]}
+        if direction == "SELL" and float(previous["Close"]) > float(previous["Open"]) and float(candle["Close"]) < float(candle["Open"]) and body >= atr * 0.8:
+            return {"low":float(previous["Low"]), "high":float(previous["High"]), "index":df.index[i-1]}
+    return None
+
+
+def _confirmation_confluence(data, aoi, direction):
+    fvg = _find_recent_fvg(data, direction)
+    ob = _find_recent_order_block(data, direction)
+    zl, zh = float(aoi["low"]), float(aoi["high"])
+    score = 0
+    if fvg is not None and not (fvg["high"] < zl or fvg["low"] > zh):
+        score += 1
+    if ob is not None and not (ob["high"] < zl or ob["low"] > zh):
+        score += 1
+    return {"score":score, "fvg":fvg, "order_block":ob}
+
+
 def _select_aoi(price, areas, direction):
     desired_type = "support" if direction == "BUY" else "resistance"
     candidates = []
@@ -477,9 +524,10 @@ def generate_signal(data_15m, data_daily, current_price):
     aoi_with_sweep = dict(aoi)
     aoi_with_sweep["sweep"] = sweep
     aoi_with_sweep["confirmation"] = confirmation
+    aoi_with_sweep["confluence"] = _confirmation_confluence(d15, aoi_with_sweep, direction)
     levels = calculate_sl_tp(direction, price, aoi_with_sweep, d15)
     if levels is None:
         return {"signal":"NONE", "reason":"INVALID_RISK", "bias":bias, "aoi":aoi_with_sweep}
     if not _target_space(levels["entry"], levels["take_profit"], areas, direction):
         return {"signal":"NONE", "reason":"INSUFFICIENT_TARGET_SPACE", "bias":bias, "aoi":aoi_with_sweep}
-    return {"signal":direction, "reason":"LIQUIDITY_SWEEP_STRUCTURE_BREAK", "bias":bias, "aoi":aoi_with_sweep, **levels}
+    return {"signal":direction, "reason":"SDMC_LIQUIDITY_SWEEP_BOS_CHOCH", "bias":bias, "aoi":aoi_with_sweep, **levels}
