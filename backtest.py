@@ -1,316 +1,144 @@
 import os
 import time
-import requests
 import pandas as pd
+
 from strategy import generate_signal
 
+
 # ============================================================
-# XAUUSD STRATEGY BACKTEST V6.2 - FCS API
+# XAUUSD STRATEGY BACKTEST V7.0
+# DUKASCOPY DATA
 # ============================================================
 
-FCS_URL = "https://api-v4.fcsapi.com/forex/history"
+DATA_FILE = "data/XAUUSD_15m.csv"
 
-API_KEY = os.getenv("FCS_API_KEY")
+DAILY_FILE = "data/XAUUSD_1d.csv"
 
-SYMBOL = "XAUUSD"
-
-PAGE_SIZE = 300
-MAX_15M_PAGES = 24
-MAX_DAILY_PAGES = 5
-
+MIN_15M_CANDLES = 300
 MAX_15M_CANDLES = 1000
 MAX_DAILY_CANDLES = 500
 
-MIN_15M = 300
-MIN_DAILY = 100
-
 RESET_DISTANCE = 10.0
-TIMEOUT = 30
-
-# FCS plan: 3 requests per minute
-RATE_LIMIT_WAIT = 62
-
-
-if not API_KEY:
-    raise RuntimeError("FCS_API_KEY is not available.")
 
 
 # ============================================================
-# FCS API
+# LOAD DATA
 # ============================================================
 
-def get_page(symbol, period, page):
+def load_data():
 
-    params = {
-        "symbol": symbol,
-        "period": period,
-        "length": PAGE_SIZE,
-        "page": page,
-        "access_key": API_KEY,
-    }
+    print()
+    print("=" * 60)
+    print("XAUUSD STRATEGY BACKTEST V7.0")
+    print("=" * 60)
+    print()
 
-    if symbol == "XAUUSD":
-        params["type"] = "commodity"
+    print("DATA SOURCE: DUKASCOPY")
+    print("SYMBOL: XAUUSD")
+    print("EXECUTION TIMEFRAME: 15M")
+    print()
 
-    while True:
+    if not os.path.exists(DATA_FILE):
+
+        raise RuntimeError(
+            f"Missing data file: {DATA_FILE}"
+        )
+
+    data_15m = pd.read_csv(
+        DATA_FILE,
+        index_col=0,
+        parse_dates=True
+    )
+
+    data_15m.columns = [
+        str(c).capitalize()
+        for c in data_15m.columns
+    ]
+
+    # --------------------------------------------------------
+    # Daily data
+    # --------------------------------------------------------
+
+    if os.path.exists(DAILY_FILE):
+
+        data_daily = pd.read_csv(
+            DAILY_FILE,
+            index_col=0,
+            parse_dates=True
+        )
+
+        data_daily.columns = [
+            str(c).capitalize()
+            for c in data_daily.columns
+        ]
+
+    else:
 
         print(
-            f"    Requesting FCS page {page}...",
-            flush=True
+            "Daily Dukascopy file not found."
         )
 
-        r = requests.get(
-            FCS_URL,
-            params=params,
-            timeout=TIMEOUT
+        print(
+            "Creating daily candles from 15M data..."
         )
 
-        r.raise_for_status()
-
-        data = r.json()
-
-        # Successful request
-        if data.get("status") is True:
-            return data.get(
-                "response",
-                {}
-            )
-
-        # FCS rate limit
-        if data.get("code") == 213:
-
-            print(
-                "    FCS RATE LIMIT HIT.",
-                flush=True
-            )
-
-            print(
-                "    Waiting 62 seconds before retrying...",
-                flush=True
-            )
-
-            time.sleep(
-                RATE_LIMIT_WAIT
-            )
-
-            print(
-                "    Retrying...",
-                flush=True
-            )
-
-            continue
-
-        # Any other API error
-        raise RuntimeError(
-            f"FCS API error: {data}"
-        )
-
-
-# ============================================================
-# CONVERT FCS RESPONSE TO DATAFRAME
-# ============================================================
-
-def to_df(response):
-
-    rows = []
-
-    if not isinstance(
-        response,
-        dict
-    ):
-        return pd.DataFrame()
-
-    for key, candle in response.items():
-
-        if not isinstance(
-            candle,
-            dict
-        ):
-            continue
-
-        try:
-
-            timestamp = int(
-                float(
-                    candle.get(
-                        "t",
-                        key
-                    )
-                )
-            )
-
-            dt = pd.to_datetime(
-                timestamp,
-                unit="s",
-                utc=True
-            ).tz_convert(None)
-
-            rows.append(
+        data_daily = (
+            data_15m
+            .resample("1D")
+            .agg(
                 {
-                    "Datetime": dt,
-                    "Open": float(
-                        candle["o"]
-                    ),
-                    "High": float(
-                        candle["h"]
-                    ),
-                    "Low": float(
-                        candle["l"]
-                    ),
-                    "Close": float(
-                        candle["c"]
-                    ),
-                    "Volume": float(
-                        candle.get(
-                            "v",
-                            0
-                        ) or 0
-                    ),
+                    "Open": "first",
+                    "High": "max",
+                    "Low": "min",
+                    "Close": "last",
+                    "Volume": "sum"
                 }
             )
-
-        except (
-            TypeError,
-            ValueError,
-            KeyError
-        ):
-            continue
-
-    if not rows:
-        return pd.DataFrame()
-
-    return (
-        pd.DataFrame(rows)
-        .drop_duplicates(
-            "Datetime"
+            .dropna()
         )
-        .sort_values(
-            "Datetime"
-        )
-        .set_index(
-            "Datetime"
-        )
+
+    data_15m = (
+        data_15m
+        .sort_index()
+        .drop_duplicates()
     )
 
-
-# ============================================================
-# DOWNLOAD HISTORY
-# ============================================================
-
-def download(
-    symbol,
-    period,
-    pages
-):
-
-    frames = []
-
-    previous_oldest = None
+    data_daily = (
+        data_daily
+        .sort_index()
+        .drop_duplicates()
+    )
 
     print(
-        f"Downloading FCS {symbol} {period} history...",
-        flush=True
+        "15m candles:",
+        len(data_15m)
     )
 
-    for page in range(
-        1,
-        pages + 1
-    ):
-
-        print(
-            f"  Page {page}/{pages}",
-            flush=True
-        )
-
-        frame = to_df(
-            get_page(
-                symbol,
-                period,
-                page
-            )
-        )
-
-        if frame.empty:
-
-            print(
-                "  No more candles returned.",
-                flush=True
-            )
-
-            break
-
-        oldest = frame.index.min()
-        newest = frame.index.max()
-
-        print(
-            f"  {len(frame)} candles | "
-            f"{oldest} -> {newest}",
-            flush=True
-        )
-
-        frames.append(
-            frame
-        )
-
-        # Make sure pagination is actually moving backwards
-        if (
-            previous_oldest is not None
-            and oldest >= previous_oldest
-        ):
-
-            print(
-                "  Pagination stopped: "
-                "page did not move backwards.",
-                flush=True
-            )
-
-            break
-
-        previous_oldest = oldest
-
-        if len(frame) < PAGE_SIZE:
-
-            print(
-                "  Final partial page reached.",
-                flush=True
-            )
-
-            break
-
-        # Small delay between requests.
-        time.sleep(1)
-
-    if not frames:
-
-        raise RuntimeError(
-            f"No {symbol} {period} data returned."
-        )
-
-    df = (
-        pd.concat(frames)
-        .reset_index()
-        .drop_duplicates(
-            "Datetime"
-        )
-        .sort_values(
-            "Datetime"
-        )
-        .set_index(
-            "Datetime"
-        )
+    print(
+        "Daily candles:",
+        len(data_daily)
     )
 
-    return df
+    print(
+        "15M range:",
+        data_15m.index.min(),
+        "->",
+        data_15m.index.max()
+    )
+
+    print()
+
+    return data_15m, data_daily
 
 
 # ============================================================
-# STRATEGY HELPERS
+# HELPERS
 # ============================================================
 
-def safe_float(x):
+def safe_float(value):
 
     try:
-        return float(x)
+        return float(value)
 
     except (
         TypeError,
@@ -344,15 +172,11 @@ def setup_key(signal):
         return None
 
     low = safe_float(
-        aoi.get(
-            "low"
-        )
+        aoi.get("low")
     )
 
     high = safe_float(
-        aoi.get(
-            "high"
-        )
+        aoi.get("high")
     )
 
     if (
@@ -377,7 +201,7 @@ def setup_key(signal):
         round(
             high,
             1
-        ),
+        )
     )
 
 
@@ -390,11 +214,11 @@ def setup_text(signal):
     if not key:
         return "UNKNOWN_SETUP"
 
-    tf, typ, low, high = key
+    timeframe, zone_type, low, high = key
 
     return (
-        f"{str(tf).upper()} "
-        f"{str(typ).upper()} "
+        f"{str(timeframe).upper()} "
+        f"{str(zone_type).upper()} "
         f"{low}-{high}"
     )
 
@@ -411,15 +235,11 @@ def aoi_reset(
         return True
 
     low = safe_float(
-        aoi.get(
-            "low"
-        )
+        aoi.get("low")
     )
 
     high = safe_float(
-        aoi.get(
-            "high"
-        )
+        aoi.get("high")
     )
 
     if (
@@ -429,6 +249,7 @@ def aoi_reset(
         return True
 
     if low <= price <= high:
+
         return False
 
     if price > high:
@@ -451,12 +272,12 @@ def aoi_reset(
 def result_for_trade(
     direction,
     entry,
-    sl,
-    tp,
+    stop_loss,
+    take_profit,
     future
 ):
 
-    for ts, candle in future.iterrows():
+    for timestamp, candle in future.iterrows():
 
         high = float(
             candle["High"]
@@ -468,55 +289,66 @@ def result_for_trade(
 
         if direction == "SELL":
 
-            stop = high >= sl
-            target = low <= tp
+            stop_hit = (
+                high >= stop_loss
+            )
+
+            target_hit = (
+                low <= take_profit
+            )
 
         else:
 
-            stop = low <= sl
-            target = high >= tp
+            stop_hit = (
+                low <= stop_loss
+            )
 
-        # Both hit during same candle:
-        # OHLC data cannot determine which happened first.
-        if stop and target:
+            target_hit = (
+                high >= take_profit
+            )
+
+        if (
+            stop_hit
+            and target_hit
+        ):
 
             return (
                 "AMBIGUOUS",
                 None,
-                ts,
+                timestamp,
                 0.0
             )
 
-        if stop:
+        if stop_hit:
 
             return (
                 "SL",
-                sl,
-                ts,
+                stop_loss,
+                timestamp,
                 -1.0
             )
 
-        if target:
+        if target_hit:
 
             risk = abs(
-                entry - sl
+                entry - stop_loss
             )
 
             reward = abs(
-                tp - entry
+                take_profit - entry
             )
 
-            r = (
+            r_multiple = (
                 reward / risk
                 if risk > 0
-                else 0.0
+                else 0
             )
 
             return (
                 "TP",
-                tp,
-                ts,
-                r
+                take_profit,
+                timestamp,
+                r_multiple
             )
 
     return (
@@ -528,80 +360,15 @@ def result_for_trade(
 
 
 # ============================================================
-# START
+# LOAD
 # ============================================================
 
-print()
+data_15m, data_daily = load_data()
 
-print(
-    "=" * 60
-)
 
-print(
-    "XAUUSD STRATEGY BACKTEST V6.2"
-)
-
-print(
-    "=" * 60
-)
-
-print()
-
-print(
-    "DATA SOURCE: FCS API"
-)
-
-print(
-    "SYMBOL: XAUUSD"
-)
-
-print(
-    "INSTRUMENT: GOLD SPOT / COMMODITY"
-)
-
-print(
-    "EXECUTION TIMEFRAME: 15M"
-)
-
-print()
-
-data_15m = download(
-    SYMBOL,
-    "15m",
-    MAX_15M_PAGES
-)
-
-print()
-
-data_daily = download(
-    SYMBOL,
-    "1d",
-    MAX_DAILY_PAGES
-)
-
-print()
-
-print(
-    "15m candles loaded:",
-    len(data_15m)
-)
-
-print(
-    "Daily candles loaded:",
-    len(data_daily)
-)
-
-if len(data_15m) < MIN_15M:
-
-    raise RuntimeError(
-        "Not enough 15m candles for backtest."
-    )
-
-if len(data_daily) < MIN_DAILY:
-
-    raise RuntimeError(
-        "Not enough daily candles for backtest."
-    )
+# ============================================================
+# BACKTEST
+# ============================================================
 
 print(
     "Checking every 15 minutes..."
@@ -623,44 +390,48 @@ print(
 )
 
 
-# ============================================================
-# BACKTEST
-# ============================================================
-
 signals = []
 
-reasons = {}
+reason_counts = {}
 
 active_trade = None
 
-locked_key = None
-locked_aoi = None
+locked_setup_key = None
+locked_setup_aoi = None
 
 blocked_open = 0
 blocked_duplicate = 0
 blocked_lock = 0
 
+evaluations = 0
+
+
+# ============================================================
+# MAIN LOOP
+# ============================================================
 
 for i in range(
-    MIN_15M,
+    MIN_15M_CANDLES,
     len(data_15m)
 ):
 
-    ts = data_15m.index[i]
+    evaluations += 1
+
+    timestamp = data_15m.index[i]
 
     # --------------------------------------------------------
-    # One open trade at a time
+    # Only one open trade
     # --------------------------------------------------------
 
     if active_trade is not None:
 
-        exit_ts = active_trade[
+        exit_time = active_trade.get(
             "exit_time"
-        ]
+        )
 
         if (
-            exit_ts is not None
-            and ts <= exit_ts
+            exit_time is not None
+            and timestamp <= exit_time
         ):
 
             blocked_open += 1
@@ -673,7 +444,7 @@ for i in range(
     # Historical windows
     # --------------------------------------------------------
 
-    hist15 = data_15m.iloc[
+    historical_15m = data_15m.iloc[
         max(
             0,
             i - MAX_15M_CANDLES
@@ -681,18 +452,20 @@ for i in range(
         i + 1
     ].copy()
 
-    histdaily = data_daily[
-        data_daily.index <= ts
+    historical_daily = data_daily[
+        data_daily.index <= timestamp
     ].tail(
         MAX_DAILY_CANDLES
     ).copy()
 
-    if len(histdaily) < MIN_DAILY:
+    if len(
+        historical_daily
+    ) < 100:
 
         continue
 
-    price = float(
-        hist15[
+    current_price = float(
+        historical_15m[
             "Close"
         ].iloc[-1]
     )
@@ -702,51 +475,43 @@ for i in range(
     # --------------------------------------------------------
 
     if (
-        locked_key is not None
-        and locked_aoi is not None
+        locked_setup_key is not None
+        and locked_setup_aoi is not None
     ):
 
         if aoi_reset(
-            price,
-            locked_aoi
+            current_price,
+            locked_setup_aoi
         ):
 
-            locked_key = None
-            locked_aoi = None
+            locked_setup_key = None
+            locked_setup_aoi = None
 
         else:
 
             blocked_lock += 1
 
     # --------------------------------------------------------
-    # Generate signal
+    # Generate strategy signal
     # --------------------------------------------------------
 
     try:
 
         signal = generate_signal(
-            hist15,
-            histdaily,
-            price
+            historical_15m,
+            historical_daily,
+            current_price
         )
 
-    except Exception as e:
+    except Exception as error:
 
-        reasons[
+        reason_counts[
             "STRATEGY_ERROR"
         ] = (
-            reasons.get(
+            reason_counts.get(
                 "STRATEGY_ERROR",
                 0
             ) + 1
-        )
-
-        print(
-            "STRATEGY ERROR:",
-            ts,
-            "|",
-            e,
-            flush=True
         )
 
         continue
@@ -755,15 +520,6 @@ for i in range(
         signal,
         dict
     ):
-
-        reasons[
-            "INVALID_SIGNAL_OBJECT"
-        ] = (
-            reasons.get(
-                "INVALID_SIGNAL_OBJECT",
-                0
-            ) + 1
-        )
 
         continue
 
@@ -782,10 +538,10 @@ for i in range(
         "SELL"
     ):
 
-        reasons[
+        reason_counts[
             reason
         ] = (
-            reasons.get(
+            reason_counts.get(
                 reason,
                 0
             ) + 1
@@ -799,13 +555,13 @@ for i in range(
         )
     )
 
-    sl = safe_float(
+    stop_loss = safe_float(
         signal.get(
             "stop_loss"
         )
     )
 
-    tp = safe_float(
+    take_profit = safe_float(
         signal.get(
             "take_profit"
         )
@@ -813,14 +569,14 @@ for i in range(
 
     if (
         entry is None
-        or sl is None
-        or tp is None
+        or stop_loss is None
+        or take_profit is None
     ):
 
-        reasons[
+        reason_counts[
             "INVALID_TRADE_LEVELS"
         ] = (
-            reasons.get(
+            reason_counts.get(
                 "INVALID_TRADE_LEVELS",
                 0
             ) + 1
@@ -828,24 +584,24 @@ for i in range(
 
         continue
 
-    key = setup_key(
+    current_setup_key = setup_key(
         signal
     )
 
-    aoi = get_aoi(
+    current_setup_aoi = get_aoi(
         signal
     )
 
     # --------------------------------------------------------
-    # Same AOI re-entry lock
+    # Same AOI lock
     # --------------------------------------------------------
 
     if (
-        locked_key is not None
-        and key == locked_key
+        locked_setup_key is not None
+        and current_setup_key == locked_setup_key
         and not aoi_reset(
-            price,
-            locked_aoi
+            current_price,
+            locked_setup_aoi
         )
     ):
 
@@ -854,15 +610,15 @@ for i in range(
         continue
 
     # --------------------------------------------------------
-    # Resolve trade
+    # Resolve
     # --------------------------------------------------------
 
-    result, exit_price, exit_time, r = (
+    result, exit_price, exit_time, r_multiple = (
         result_for_trade(
             direction,
             entry,
-            sl,
-            tp,
+            stop_loss,
+            take_profit,
             data_15m.iloc[
                 i + 1:
             ]
@@ -878,31 +634,24 @@ for i in range(
         bias,
         dict
     ):
-        bias = {}
 
-    setup_id = (
-        f"{ts.strftime('%Y%m%d-%H%M')}-"
-        f"{direction}-"
-        f"{abs(hash(str(key))) % 100000:05d}"
-    )
+        bias = {}
 
     trade = {
 
-        "setup_id": setup_id,
-
-        "time": ts,
+        "time": timestamp,
 
         "signal": direction,
 
         "entry": entry,
 
-        "sl": sl,
+        "stop_loss": stop_loss,
 
-        "tp": tp,
+        "take_profit": take_profit,
 
         "result": result,
 
-        "r": r,
+        "r": r_multiple,
 
         "reason": reason,
 
@@ -910,43 +659,48 @@ for i in range(
             signal
         ),
 
-        "weekly": bias.get(
+        "weekly_bias": bias.get(
             "weekly",
             "UNKNOWN"
         ),
 
-        "daily": bias.get(
+        "daily_bias": bias.get(
             "daily",
             "UNKNOWN"
         ),
 
-        "4h": bias.get(
+        "4h_bias": bias.get(
             "4h",
             "UNKNOWN"
         ),
 
-        "overall": bias.get(
+        "overall_bias": bias.get(
             "overall",
             "UNKNOWN"
         ),
 
         "exit_time": exit_time,
 
-        "exit_price": exit_price,
+        "exit_price": exit_price
     }
 
     signals.append(
         trade
     )
 
-    locked_key = key
-    locked_aoi = aoi
+    locked_setup_key = (
+        current_setup_key
+    )
+
+    locked_setup_aoi = (
+        current_setup_aoi
+    )
 
     active_trade = trade
 
     print(
         "SIGNAL FOUND:",
-        ts,
+        timestamp,
         "|",
         direction,
         "| Entry:",
@@ -958,7 +712,7 @@ for i in range(
         result,
         "| R:",
         round(
-            r,
+            r_multiple,
             2
         ),
         "| Setup:",
@@ -967,6 +721,32 @@ for i in range(
         ],
         flush=True
     )
+
+    if evaluations % 1000 == 0:
+
+        progress = (
+            evaluations
+            / max(
+                1,
+                len(data_15m)
+                - MIN_15M_CANDLES
+            )
+            * 100
+        )
+
+        print(
+            "Progress:",
+            round(
+                progress,
+                1
+            ),
+            "%",
+            "| Checked:",
+            evaluations,
+            "| Signals:",
+            len(signals),
+            flush=True
+        )
 
 
 # ============================================================
@@ -1002,12 +782,12 @@ total = len(
     signals
 )
 
-buys = sum(
+buy_count = sum(
     x["signal"] == "BUY"
     for x in signals
 )
 
-sells = sum(
+sell_count = sum(
     x["signal"] == "SELL"
     for x in signals
 )
@@ -1022,7 +802,7 @@ sl_count = sum(
     for x in signals
 )
 
-amb = sum(
+ambiguous_count = sum(
     x["result"] == "AMBIGUOUS"
     for x in signals
 )
@@ -1078,61 +858,35 @@ expectancy = (
 
 equity = 0
 peak = 0
-max_dd = 0
+max_drawdown = 0
 
-for x in signals:
+for trade in signals:
 
-    equity += x["r"]
+    equity += trade[
+        "r"
+    ]
 
     peak = max(
         peak,
         equity
     )
 
-    max_dd = max(
-        max_dd,
+    max_drawdown = max(
+        max_drawdown,
         peak - equity
     )
 
-if len(signals) >= 2:
-
-    times = [
-        x["time"]
-        for x in signals
-    ]
-
-    longest_gap = max(
-        (
-            times[j]
-            - times[j - 1]
-        ).total_seconds()
-        / 86400
-
-        for j in range(
-            1,
-            len(times)
-        )
-    )
-
-else:
-
-    longest_gap = None
-
 
 # ============================================================
-# RESULTS
+# PRINT RESULTS
 # ============================================================
 
 print(
-    "DATA SOURCE: FCS API"
+    "DATA SOURCE: DUKASCOPY"
 )
 
 print(
     "SYMBOL: XAUUSD"
-)
-
-print(
-    "INSTRUMENT: GOLD SPOT"
 )
 
 print()
@@ -1177,11 +931,7 @@ print(
 
 print(
     "15M EVALUATIONS:",
-    max(
-        0,
-        len(data_15m)
-        - MIN_15M
-    )
+    evaluations
 )
 
 print(
@@ -1199,18 +949,18 @@ print(
 print()
 
 print(
-    "TOTAL INDEPENDENT SETUPS:",
+    "TOTAL SETUPS:",
     total
 )
 
 print(
     "BUY SETUPS:",
-    buys
+    buy_count
 )
 
 print(
     "SELL SETUPS:",
-    sells
+    sell_count
 )
 
 print(
@@ -1219,7 +969,7 @@ print(
         total / weeks,
         2
     )
-    if weeks
+    if weeks > 0
     else 0
 )
 
@@ -1237,7 +987,7 @@ print(
 
 print(
     "AMBIGUOUS:",
-    amb
+    ambiguous_count
 )
 
 print(
@@ -1293,28 +1043,10 @@ print(
 print(
     "MAX DRAWDOWN:",
     round(
-        max_dd,
+        max_drawdown,
         2
     ),
     "R"
-)
-
-print(
-    "LONGEST GAP BETWEEN "
-    "INDEPENDENT SETUPS:",
-    (
-        round(
-            longest_gap,
-            2
-        )
-        if longest_gap is not None
-        else "N/A"
-    ),
-    (
-        "days"
-        if longest_gap is not None
-        else ""
-    )
 )
 
 print()
@@ -1346,34 +1078,6 @@ print(
     blocked_lock
 )
 
-if reasons:
-
-    print()
-
-    print(
-        "=" * 60
-    )
-
-    print(
-        "TOP SIGNAL REJECTION REASONS"
-    )
-
-    print(
-        "=" * 60
-    )
-
-    for reason, count in sorted(
-        reasons.items(),
-        key=lambda x: x[1],
-        reverse=True
-    )[:20]:
-
-        print(
-            reason,
-            ":",
-            count
-        )
-
 print()
 
 print(
@@ -1381,14 +1085,20 @@ print(
 )
 
 print(
-    "INDEPENDENT SETUPS"
+    "INDIVIDUAL SIGNALS"
 )
 
 print(
     "=" * 60
 )
 
-for n, x in enumerate(
+if not signals:
+
+    print(
+        "NO SIGNALS FOUND."
+    )
+
+for number, trade in enumerate(
     signals,
     1
 ):
@@ -1396,100 +1106,66 @@ for n, x in enumerate(
     print()
 
     print(
-        n,
+        number,
         "|",
-        x["setup_id"]
-    )
-
-    print(
-        "Time:",
-        x["time"]
-    )
-
-    print(
-        "Setup:",
-        x["setup"]
+        trade["time"]
     )
 
     print(
         "Signal:",
-        x["signal"]
+        trade["signal"]
     )
 
     print(
         "Entry:",
-        round(
-            x["entry"],
-            2
-        )
+        trade["entry"]
     )
 
     print(
         "SL:",
-        round(
-            x["sl"],
-            2
-        )
+        trade["stop_loss"]
     )
 
     print(
         "TP:",
-        round(
-            x["tp"],
-            2
-        )
+        trade["take_profit"]
     )
 
     print(
         "Result:",
-        x["result"]
+        trade["result"]
     )
 
     print(
         "R:",
         round(
-            x["r"],
+            trade["r"],
             2
         )
     )
 
     print(
         "Reason:",
-        x["reason"]
+        trade["reason"]
     )
 
     print(
-        "Weekly Bias:",
-        x["weekly"]
-    )
-
-    print(
-        "Daily Bias:",
-        x["daily"]
-    )
-
-    print(
-        "4H Bias:",
-        x["4h"]
+        "Setup:",
+        trade["setup"]
     )
 
     print(
         "Overall Bias:",
-        x["overall"]
+        trade["overall_bias"]
     )
 
-    if x["exit_time"] is not None:
+    if trade["exit_time"] is not None:
 
         print(
             "Exit:",
-            x["exit_time"]
+            trade["exit_time"]
         )
 
-if not signals:
-
-    print(
-        "NO INDEPENDENT SETUPS FOUND."
-    )
 
 print()
 
