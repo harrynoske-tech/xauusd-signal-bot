@@ -19,7 +19,11 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pandas numpy
+          pip install pandas numpy requests dukascopy-python
+
+      - name: Download Dukascopy data
+        run: |
+          python dukascopy_data.py
 
       - name: Run backtest
         run: |
