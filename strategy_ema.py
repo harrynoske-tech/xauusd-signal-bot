@@ -19,8 +19,8 @@ ALLOWED_HOURS = {
     5,
 }
 
-MIN_UPPER_WICK_RATIO = 0.40
-MIN_BEARISH_BODY_RATIO = 0.30
+MIN_UPPER_WICK_RATIO = 0.35
+MIN_BEARISH_BODY_RATIO = 0.25
 
 
 def generate_signal(data_15m, data_daily=None, price=None):
