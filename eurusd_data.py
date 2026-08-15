@@ -1,17 +1,24 @@
 # ============================================================
 # EURUSD 15M DATA DOWNLOADER
+# SOURCE: DUKASCOPY
 # ============================================================
 
 import os
 import pandas as pd
-import yfinance as yf
+from dukascopy_python import fetch
 
 
 # ============================================================
 # SETTINGS
 # ============================================================
 
-SYMBOL = "EURUSD=X"
+SYMBOL = "EURUSD"
+
+TIMEFRAME = "15m"
+
+START_DATE = "2020-01-01"
+
+END_DATE = "2026-08-14"
 
 OUTPUT_FILE = "data/EURUSD_15m.csv"
 
@@ -26,6 +33,13 @@ def main():
     print("EURUSD 15M DATA DOWNLOADER")
     print("=" * 60)
 
+    print()
+    print("SOURCE: DUKASCOPY")
+    print("SYMBOL:", SYMBOL)
+    print("TIMEFRAME:", TIMEFRAME)
+    print("START:", START_DATE)
+    print("END:", END_DATE)
+
     os.makedirs(
         "data",
         exist_ok=True
@@ -33,79 +47,117 @@ def main():
 
     print()
     print("Downloading EURUSD data...")
+    print("This may take several minutes.")
 
-    df = yf.download(
-        SYMBOL,
-        period="60d",
-        interval="15m",
-        auto_adjust=False,
-        progress=False,
-    )
+    try:
 
-    if df.empty:
+        df = fetch(
+            SYMBOL,
+            timeframe=TIMEFRAME,
+            start=START_DATE,
+            end=END_DATE,
+        )
+
+    except Exception as e:
 
         raise RuntimeError(
-            "No EURUSD data was downloaded."
+            f"EURUSD download failed: {e}"
         )
 
-    # --------------------------------------------------------
-    # Flatten columns if required
-    # --------------------------------------------------------
+    if df is None or len(df) == 0:
 
-    if isinstance(
-        df.columns,
-        pd.MultiIndex
-    ):
-
-        df.columns = [
-            column[0]
-            for column in df.columns
-        ]
-
-    # --------------------------------------------------------
-    # Rename columns
-    # --------------------------------------------------------
-
-    df = df.rename(
-        columns={
-            "Open": "Open",
-            "High": "High",
-            "Low": "Low",
-            "Close": "Close",
-            "Volume": "Volume",
-        }
-    )
-
-    # --------------------------------------------------------
-    # Remove timezone if present
-    # --------------------------------------------------------
-
-    if df.index.tz is not None:
-
-        df.index = (
-            df.index
-            .tz_convert("UTC")
-            .tz_localize(None)
+        raise RuntimeError(
+            "Dukascopy returned no EURUSD data."
         )
 
-    # --------------------------------------------------------
-    # Reset index
-    # --------------------------------------------------------
+    # ========================================================
+    # NORMALISE COLUMNS
+    # ========================================================
 
-    df = df.reset_index()
+    df.columns = [
+        str(column).strip()
+        for column in df.columns
+    ]
+
+    rename = {}
+
+    for column in df.columns:
+
+        lower = column.lower()
+
+        if lower in [
+            "date",
+            "datetime",
+            "timestamp",
+            "time",
+        ]:
+
+            rename[column] = "time"
+
+        elif lower == "open":
+
+            rename[column] = "Open"
+
+        elif lower == "high":
+
+            rename[column] = "High"
+
+        elif lower == "low":
+
+            rename[column] = "Low"
+
+        elif lower == "close":
+
+            rename[column] = "Close"
+
+        elif lower == "volume":
+
+            rename[column] = "Volume"
 
     df = df.rename(
-        columns={
-            "Datetime": "time",
-            "Date": "time",
-        }
+        columns=rename
     )
 
-    # --------------------------------------------------------
-    # Keep required columns
-    # --------------------------------------------------------
+    # ========================================================
+    # HANDLE DATETIME INDEX
+    # ========================================================
 
-    required_columns = [
+    if "time" not in df.columns:
+
+        if isinstance(
+            df.index,
+            pd.DatetimeIndex
+        ):
+
+            df = df.reset_index()
+
+            df = df.rename(
+                columns={
+                    df.columns[0]:
+                    "time"
+                }
+            )
+
+        else:
+
+            raise RuntimeError(
+                "Could not find EURUSD time column."
+            )
+
+    # ========================================================
+    # DATETIME
+    # ========================================================
+
+    df["time"] = pd.to_datetime(
+        df["time"],
+        utc=True
+    )
+
+    # ========================================================
+    # REQUIRED COLUMNS
+    # ========================================================
+
+    required = [
         "time",
         "Open",
         "High",
@@ -113,21 +165,26 @@ def main():
         "Close",
     ]
 
-    for column in required_columns:
+    for column in required:
 
         if column not in df.columns:
 
             raise RuntimeError(
-                f"Missing column: {column}"
+                f"Missing required column: {column}"
             )
 
-    df = df[
-        required_columns
-    ]
+    # ========================================================
+    # CLEAN
+    # ========================================================
 
-    # --------------------------------------------------------
-    # Clean data
-    # --------------------------------------------------------
+    df = df[
+        required
+        + (
+            ["Volume"]
+            if "Volume" in df.columns
+            else []
+        )
+    ]
 
     df = df.dropna()
 
@@ -139,22 +196,22 @@ def main():
         subset="time"
     )
 
-    # --------------------------------------------------------
-    # Save
-    # --------------------------------------------------------
+    # ========================================================
+    # SAVE
+    # ========================================================
 
     df.to_csv(
         OUTPUT_FILE,
         index=False
     )
 
-    # --------------------------------------------------------
-    # Summary
-    # --------------------------------------------------------
+    # ========================================================
+    # VERIFY
+    # ========================================================
 
     print()
     print("=" * 60)
-    print("EURUSD DATA DOWNLOADED")
+    print("EURUSD DOWNLOAD COMPLETE")
     print("=" * 60)
 
     print(
@@ -174,6 +231,38 @@ def main():
         OUTPUT_FILE
     )
 
+    print("=" * 60)
+
+    # ========================================================
+    # BASIC DATA QUALITY CHECK
+    # ========================================================
+
+    print()
+    print("DATA QUALITY")
+    print("-" * 60)
+
+    print(
+        "Missing values:",
+        int(df.isna().sum().sum())
+    )
+
+    print(
+        "Duplicate timestamps:",
+        int(
+            df["time"]
+            .duplicated()
+            .sum()
+        )
+    )
+
+    print(
+        "Unique timestamps:",
+        df["time"].nunique()
+    )
+
+    print()
+    print("=" * 60)
+    print("EURUSD READY FOR BACKTESTING")
     print("=" * 60)
 
 
