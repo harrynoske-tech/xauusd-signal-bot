@@ -15,7 +15,6 @@ SWING_LOOKBACK = 8
 ALLOWED_HOURS = {
     2,
     3,
-    8,
     12,
     13,
 }
