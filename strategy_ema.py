@@ -9,7 +9,7 @@ import pandas as pd
 EMA_FAST = 20
 EMA_SLOW = 50
 
-RR = 1.5
+RR = 1.0
 
 MAX_BARS_AFTER_CROSS = 60
 
