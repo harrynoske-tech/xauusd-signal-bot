@@ -1,5 +1,5 @@
 # ============================================================
-# XAUUSD EMA V4 — SELL ONLY
+# XAUUSD EMA V5 — HIGH-CONVICTION SELL
 # ============================================================
 
 EMA_FAST = 20
@@ -19,36 +19,31 @@ ALLOWED_HOURS = {
     13,
 }
 
+MIN_UPPER_WICK_RATIO = 0.40
+MIN_BEARISH_BODY_RATIO = 0.30
+
 
 def generate_signal(data_15m, data_daily=None, price=None):
 
     if len(data_15m) < EMA_SLOW + 20:
-        return {
-            "signal": "NONE",
-            "reason": "NOT_ENOUGH_DATA"
-        }
+        return {"signal": "NONE", "reason": "NOT_ENOUGH_DATA"}
 
     timestamp = data_15m.index[-1]
 
     if timestamp.hour not in ALLOWED_HOURS:
-        return {
-            "signal": "NONE",
-            "reason": "OUTSIDE_SESSION"
-        }
+        return {"signal": "NONE", "reason": "OUTSIDE_SESSION"}
 
     df = data_15m.copy()
 
-    df["EMA20"] = (
-        df["Close"]
-        .ewm(span=EMA_FAST, adjust=False)
-        .mean()
-    )
+    df["EMA20"] = df["Close"].ewm(
+        span=EMA_FAST,
+        adjust=False
+    ).mean()
 
-    df["EMA50"] = (
-        df["Close"]
-        .ewm(span=EMA_SLOW, adjust=False)
-        .mean()
-    )
+    df["EMA50"] = df["Close"].ewm(
+        span=EMA_SLOW,
+        adjust=False
+    ).mean()
 
     current = df.iloc[-1]
 
@@ -76,22 +71,34 @@ def generate_signal(data_15m, data_daily=None, price=None):
     # EMA SLOPE
     # --------------------------------------------------------
 
-    ema20_previous = float(
-        df.iloc[-5]["EMA20"]
-    )
-
-    ema50_previous = float(
-        df.iloc[-5]["EMA50"]
-    )
+    ema20_previous = float(df.iloc[-5]["EMA20"])
+    ema50_previous = float(df.iloc[-5]["EMA50"])
 
     ema20_slope = ema20 - ema20_previous
     ema50_slope = ema50 - ema50_previous
 
+    if ema20 >= ema50:
+        return {
+            "signal": "NONE",
+            "reason": "NOT_BEARISH"
+        }
+
+    if ema20_slope >= 0:
+        return {
+            "signal": "NONE",
+            "reason": "EMA20_NOT_FALLING"
+        }
+
+    if ema50_slope >= 0:
+        return {
+            "signal": "NONE",
+            "reason": "EMA50_NOT_FALLING"
+        }
+
     # --------------------------------------------------------
-    # FIND MOST RECENT BEARISH CROSS
+    # FIND RECENT BEARISH CROSS
     # --------------------------------------------------------
 
-    cross_index = None
     bars_since_cross = None
 
     search_start = max(
@@ -118,11 +125,10 @@ def generate_signal(data_15m, data_daily=None, price=None):
             previous_fast >= previous_slow
             and current_fast < current_slow
         ):
-            cross_index = i
             bars_since_cross = len(df) - 1 - i
             break
 
-    if cross_index is None:
+    if bars_since_cross is None:
         return {
             "signal": "NONE",
             "reason": "NO_RECENT_BEARISH_CROSS"
@@ -135,29 +141,7 @@ def generate_signal(data_15m, data_daily=None, price=None):
         }
 
     # --------------------------------------------------------
-    # BEARISH TREND
-    # --------------------------------------------------------
-
-    if ema20 >= ema50:
-        return {
-            "signal": "NONE",
-            "reason": "BEARISH_ALIGNMENT_FAILED"
-        }
-
-    if ema20_slope >= 0:
-        return {
-            "signal": "NONE",
-            "reason": "EMA20_NOT_FALLING"
-        }
-
-    if ema50_slope >= 0:
-        return {
-            "signal": "NONE",
-            "reason": "EMA50_NOT_FALLING"
-        }
-
-    # --------------------------------------------------------
-    # PULLBACK
+    # PULLBACK TO EMA20
     # --------------------------------------------------------
 
     previous_candle = df.iloc[-2]
@@ -188,7 +172,7 @@ def generate_signal(data_15m, data_daily=None, price=None):
         }
 
     # --------------------------------------------------------
-    # BEARISH REJECTION CANDLE
+    # STRONG BEARISH REJECTION
     # --------------------------------------------------------
 
     candle_range = high - low
@@ -199,29 +183,38 @@ def generate_signal(data_15m, data_daily=None, price=None):
             "reason": "INVALID_CANDLE"
         }
 
-    upper_wick = (
-        high - max(open_price, close)
+    body = abs(close - open_price)
+
+    upper_wick = high - max(
+        open_price,
+        close
     )
 
+    body_ratio = body / candle_range
+    upper_wick_ratio = upper_wick / candle_range
+
+    # Must be a bearish candle.
     if close >= open_price:
         return {
             "signal": "NONE",
             "reason": "NOT_BEARISH_CANDLE"
         }
 
-    if (
-        upper_wick / candle_range
-        < 0.25
-    ):
+    # Stronger upper rejection.
+    if upper_wick_ratio < MIN_UPPER_WICK_RATIO:
         return {
-            "signal": "NONE",
-            "reason": "WEAK_REJECTION"
+            "signal": "WEAK_UPPER_REJECTION",
+            "reason": "NONE"
         }
 
-    # --------------------------------------------------------
-    # EMA20 REJECTION
-    # --------------------------------------------------------
+    # Meaningful bearish body.
+    if body_ratio < MIN_BEARISH_BODY_RATIO:
+        return {
+            "signal": "NONE",
+            "reason": "BEARISH_BODY_TOO_SMALL"
+        }
 
+    # Close below EMA20.
     if close >= ema20:
         return {
             "signal": "NONE",
@@ -260,7 +253,7 @@ def generate_signal(data_15m, data_daily=None, price=None):
         "stop_loss": stop_loss,
         "take_profit": take_profit,
         "score": 100,
-        "reason": "EMA_SELL_PULLBACK",
+        "reason": "EMA_STRONG_BEARISH_REJECTION",
         "components": {
             "session_hour": timestamp.hour,
             "ema20": ema20,
@@ -268,6 +261,8 @@ def generate_signal(data_15m, data_daily=None, price=None):
             "ema_separation": separation,
             "ema20_slope": ema20_slope,
             "ema50_slope": ema50_slope,
-            "bars_since_cross": bars_since_cross
+            "bars_since_cross": bars_since_cross,
+            "upper_wick_ratio": upper_wick_ratio,
+            "body_ratio": body_ratio
         }
     }
