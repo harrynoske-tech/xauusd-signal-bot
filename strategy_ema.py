@@ -2,7 +2,8 @@ import pandas as pd
 
 
 # ============================================================
-# XAUUSD EMA 20/50 PULLBACK STRATEGY
+# XAUUSD EMA V2
+# EMA 20/50 PULLBACK + STRONGER CONFIRMATION
 # ============================================================
 
 EMA_FAST = 20
@@ -10,9 +11,16 @@ EMA_SLOW = 50
 
 RR = 2.5
 
-PULLBACK_TOLERANCE = 0.0015
+MAX_BARS_AFTER_CROSS = 60
 
-MAX_BARS_AFTER_CROSS = 40
+# Pullback must come reasonably close to EMA20.
+PULLBACK_TOLERANCE = 0.0020
+
+# Require minimum EMA separation relative to price.
+MIN_EMA_SEPARATION = 0.0008
+
+# Lookback for structural stop.
+SWING_LOOKBACK = 8
 
 
 def generate_signal(
@@ -21,13 +29,18 @@ def generate_signal(
     price=None
 ):
 
-    if len(data_15m) < EMA_SLOW + 5:
+    if len(data_15m) < EMA_SLOW + 20:
+
         return {
             "signal": "NONE",
             "reason": "NOT_ENOUGH_DATA"
         }
 
     df = data_15m.copy()
+
+    # --------------------------------------------------------
+    # EMA
+    # --------------------------------------------------------
 
     df["EMA20"] = (
         df["Close"]
@@ -47,12 +60,7 @@ def generate_signal(
         .mean()
     )
 
-    # --------------------------------------------------------
-    # Most recent completed candle
-    # --------------------------------------------------------
-
     current = df.iloc[-1]
-    previous = df.iloc[-2]
 
     ema20 = float(
         current["EMA20"]
@@ -62,28 +70,66 @@ def generate_signal(
         current["EMA50"]
     )
 
-    previous_ema20 = float(
-        previous["EMA20"]
-    )
-
-    previous_ema50 = float(
-        previous["EMA50"]
-    )
-
-    current_close = float(
+    close = float(
         current["Close"]
     )
 
-    current_high = float(
+    high = float(
         current["High"]
     )
 
-    current_low = float(
+    low = float(
         current["Low"]
     )
 
+    open_price = float(
+        current["Open"]
+    )
+
     # --------------------------------------------------------
-    # Find most recent EMA cross
+    # EMA TREND STRENGTH
+    # --------------------------------------------------------
+
+    separation = abs(
+        ema20 - ema50
+    ) / close
+
+    if separation < MIN_EMA_SEPARATION:
+
+        return {
+            "signal": "NONE",
+            "reason": "EMA_TREND_TOO_WEAK"
+        }
+
+    # --------------------------------------------------------
+    # EMA SLOPE
+    # --------------------------------------------------------
+
+    if len(df) < 6:
+
+        return {
+            "signal": "NONE",
+            "reason": "NOT_ENOUGH_SLOPE_DATA"
+        }
+
+    ema20_previous = float(
+        df.iloc[-5]["EMA20"]
+    )
+
+    ema50_previous = float(
+        df.iloc[-5]["EMA50"]
+    )
+
+    ema20_slope = (
+        ema20 - ema20_previous
+    )
+
+    ema50_slope = (
+        ema50 - ema50_previous
+    )
+
+    # --------------------------------------------------------
+    # FIND MOST RECENT CROSS
     # --------------------------------------------------------
 
     cross_direction = None
@@ -91,7 +137,9 @@ def generate_signal(
 
     search_start = max(
         1,
-        len(df) - MAX_BARS_AFTER_CROSS - 1
+        len(df)
+        - MAX_BARS_AFTER_CROSS
+        - 1
     )
 
     for i in range(
@@ -100,35 +148,49 @@ def generate_signal(
         -1
     ):
 
-        a = df.iloc[i - 1]
-        b = df.iloc[i]
+        previous = df.iloc[i - 1]
+        candle = df.iloc[i]
 
-        a_fast = float(a["EMA20"])
-        a_slow = float(a["EMA50"])
+        previous_fast = float(
+            previous["EMA20"]
+        )
 
-        b_fast = float(b["EMA20"])
-        b_slow = float(b["EMA50"])
+        previous_slow = float(
+            previous["EMA50"]
+        )
 
-        # Bullish cross
+        current_fast = float(
+            candle["EMA20"]
+        )
+
+        current_slow = float(
+            candle["EMA50"]
+        )
+
         if (
-            a_fast <= a_slow
-            and b_fast > b_slow
+            previous_fast
+            <= previous_slow
+            and current_fast
+            > current_slow
         ):
 
             cross_direction = "BUY"
+
             bars_since_cross = (
                 len(df) - 1 - i
             )
 
             break
 
-        # Bearish cross
         if (
-            a_fast >= a_slow
-            and b_fast < b_slow
+            previous_fast
+            >= previous_slow
+            and current_fast
+            < current_slow
         ):
 
             cross_direction = "SELL"
+
             bars_since_cross = (
                 len(df) - 1 - i
             )
@@ -144,7 +206,8 @@ def generate_signal(
 
     if (
         bars_since_cross is None
-        or bars_since_cross > MAX_BARS_AFTER_CROSS
+        or bars_since_cross
+        > MAX_BARS_AFTER_CROSS
     ):
 
         return {
@@ -153,61 +216,128 @@ def generate_signal(
         }
 
     # --------------------------------------------------------
-    # BUY setup
+    # RECENT CANDLE HISTORY
     # --------------------------------------------------------
+
+    previous_candle = df.iloc[-2]
+
+    previous_close = float(
+        previous_candle["Close"]
+    )
+
+    previous_ema20 = float(
+        previous_candle["EMA20"]
+    )
+
+    # ========================================================
+    # BUY
+    # ========================================================
 
     if cross_direction == "BUY":
 
-        # Trend must still be bullish.
+        # EMA alignment.
         if ema20 <= ema50:
 
             return {
                 "signal": "NONE",
-                "reason": "BULLISH_TREND_LOST"
+                "reason": "BULLISH_ALIGNMENT_FAILED"
             }
 
-        # Price must pull back toward the 20 EMA.
-        distance = abs(
-            current_low - ema20
-        )
-
-        tolerance = (
-            current_close
-            * PULLBACK_TOLERANCE
-        )
-
-        if distance > tolerance:
+        # Both EMAs need to be rising.
+        if ema20_slope <= 0:
 
             return {
                 "signal": "NONE",
-                "reason": "NO_20EMA_PULLBACK"
+                "reason": "EMA20_NOT_RISING"
             }
 
-        # Require the candle to finish back above EMA20.
-        if current_close <= ema20:
+        if ema50_slope <= 0:
 
             return {
                 "signal": "NONE",
-                "reason": "NO_BULLISH_RECLAIM"
+                "reason": "EMA50_NOT_RISING"
             }
 
-        entry = current_close
+        # Previous candle should have interacted with EMA20.
+        previous_distance = abs(
+            previous_close - previous_ema20
+        ) / previous_close
 
-        # Fixed structural stop using pullback candle.
-        stop_loss = min(
-            current_low,
-            ema20
+        current_distance = abs(
+            close - ema20
+        ) / close
+
+        if (
+            previous_distance
+            > PULLBACK_TOLERANCE
+            and current_distance
+            > PULLBACK_TOLERANCE
+        ):
+
+            return {
+                "signal": "NONE",
+                "reason": "NO_PULLBACK"
+            }
+
+        # Current candle must reject lower prices.
+        candle_range = high - low
+
+        if candle_range <= 0:
+
+            return {
+                "signal": "NONE",
+                "reason": "INVALID_CANDLE"
+            }
+
+        lower_wick = min(
+            open_price,
+            close
+        ) - low
+
+        # Bullish rejection.
+        if (
+            close <= open_price
+            or lower_wick
+            / candle_range
+            < 0.25
+        ):
+
+            return {
+                "signal": "NONE",
+                "reason": "WEAK_BULLISH_REJECTION"
+            }
+
+        # Must close above EMA20.
+        if close <= ema20:
+
+            return {
+                "signal": "NONE",
+                "reason": "NO_EMA20_RECLAIM"
+            }
+
+        entry = close
+
+        # Structural swing low.
+        recent_low = float(
+            df["Low"]
+            .iloc[
+                -SWING_LOOKBACK:
+            ]
+            .min()
         )
+
+        stop_loss = recent_low
 
         risk = (
-            entry - stop_loss
+            entry
+            - stop_loss
         )
 
         if risk <= 0:
 
             return {
                 "signal": "NONE",
-                "reason": "INVALID_RISK"
+                "reason": "INVALID_BUY_RISK"
             }
 
         take_profit = (
@@ -221,71 +351,131 @@ def generate_signal(
             "stop_loss": stop_loss,
             "take_profit": take_profit,
             "score": 100,
-            "reason": "EMA20_50_BULLISH_PULLBACK",
+            "reason":
+                "EMA_BULLISH_PULLBACK_REJECTION",
             "components": {
                 "ema20": ema20,
                 "ema50": ema50,
+                "ema_separation":
+                    separation,
+                "ema20_slope":
+                    ema20_slope,
+                "ema50_slope":
+                    ema50_slope,
                 "bars_since_cross":
                     bars_since_cross
             }
         }
 
-    # --------------------------------------------------------
-    # SELL setup
-    # --------------------------------------------------------
+    # ========================================================
+    # SELL
+    # ========================================================
 
     if cross_direction == "SELL":
 
-        # Trend must still be bearish.
+        # EMA alignment.
         if ema20 >= ema50:
 
             return {
                 "signal": "NONE",
-                "reason": "BEARISH_TREND_LOST"
+                "reason": "BEARISH_ALIGNMENT_FAILED"
             }
 
-        # Price must pull back toward the 20 EMA.
-        distance = abs(
-            current_high - ema20
-        )
-
-        tolerance = (
-            current_close
-            * PULLBACK_TOLERANCE
-        )
-
-        if distance > tolerance:
+        # Both EMAs need to be falling.
+        if ema20_slope >= 0:
 
             return {
                 "signal": "NONE",
-                "reason": "NO_20EMA_PULLBACK"
+                "reason": "EMA20_NOT_FALLING"
             }
 
-        # Require candle to finish back below EMA20.
-        if current_close >= ema20:
+        if ema50_slope >= 0:
 
             return {
                 "signal": "NONE",
-                "reason": "NO_BEARISH_REJECTION"
+                "reason": "EMA50_NOT_FALLING"
             }
 
-        entry = current_close
+        # Previous candle should have interacted with EMA20.
+        previous_distance = abs(
+            previous_close - previous_ema20
+        ) / previous_close
 
-        # Fixed structural stop using pullback candle.
-        stop_loss = max(
-            current_high,
-            ema20
+        current_distance = abs(
+            close - ema20
+        ) / close
+
+        if (
+            previous_distance
+            > PULLBACK_TOLERANCE
+            and current_distance
+            > PULLBACK_TOLERANCE
+        ):
+
+            return {
+                "signal": "NONE",
+                "reason": "NO_PULLBACK"
+            }
+
+        # Current candle must reject higher prices.
+        candle_range = high - low
+
+        if candle_range <= 0:
+
+            return {
+                "signal": "NONE",
+                "reason": "INVALID_CANDLE"
+            }
+
+        upper_wick = high - max(
+            open_price,
+            close
         )
+
+        # Bearish rejection.
+        if (
+            close >= open_price
+            or upper_wick
+            / candle_range
+            < 0.25
+        ):
+
+            return {
+                "signal": "NONE",
+                "reason": "WEAK_BEARISH_REJECTION"
+            }
+
+        # Must close below EMA20.
+        if close >= ema20:
+
+            return {
+                "signal": "NONE",
+                "reason": "NO_EMA20_RECLAIM"
+            }
+
+        entry = close
+
+        # Structural swing high.
+        recent_high = float(
+            df["High"]
+            .iloc[
+                -SWING_LOOKBACK:
+            ]
+            .max()
+        )
+
+        stop_loss = recent_high
 
         risk = (
-            stop_loss - entry
+            stop_loss
+            - entry
         )
 
         if risk <= 0:
 
             return {
                 "signal": "NONE",
-                "reason": "INVALID_RISK"
+                "reason": "INVALID_SELL_RISK"
             }
 
         take_profit = (
@@ -299,10 +489,17 @@ def generate_signal(
             "stop_loss": stop_loss,
             "take_profit": take_profit,
             "score": 100,
-            "reason": "EMA20_50_BEARISH_PULLBACK",
+            "reason":
+                "EMA_BEARISH_PULLBACK_REJECTION",
             "components": {
                 "ema20": ema20,
                 "ema50": ema50,
+                "ema_separation":
+                    separation,
+                "ema20_slope":
+                    ema20_slope,
+                "ema50_slope":
+                    ema50_slope,
                 "bars_since_cross":
                     bars_since_cross
             }
