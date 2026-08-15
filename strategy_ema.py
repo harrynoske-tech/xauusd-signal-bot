@@ -15,8 +15,6 @@ SWING_LOOKBACK = 8
 ALLOWED_HOURS = {
     2,
     3,
-    12,
-    13,
 }
 
 MIN_UPPER_WICK_RATIO = 0.40
