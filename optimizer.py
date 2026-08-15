@@ -5,18 +5,38 @@ from itertools import product
 
 
 # ============================================================
-# XAUUSD OPTIMIZER V3
+# MULTI-MARKET OPTIMIZER V4
 #
-# WALK-FORWARD / OUT-OF-SAMPLE TESTING
+# XAUUSD + EURUSD
 #
-# We optimise on one period, then test those exact parameters
-# on completely unseen future data.
+# PURPOSE:
+#   1. Test the existing strategy across multiple markets.
+#   2. Use walk-forward / out-of-sample testing.
+#   3. Give greater importance to recent market regimes.
+#   4. Keep older periods as robustness checks.
 #
-# NO LIVE TRADING.
+# IMPORTANT:
+#   NO LIVE TRADING.
+#   NO FUTURE DATA USED DURING TRAINING.
 # ============================================================
 
-DATA_FILE = "data/XAUUSD_15m.csv"
-OUTPUT_FILE = "data/optimizer_v3_results.csv"
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+MARKETS = {
+    "XAUUSD": {
+        "data_file": "data/XAUUSD_15m.csv",
+        "output_file": "data/xauusd_optimizer_v4_results.csv",
+    },
+    "EURUSD": {
+        "data_file": "data/EURUSD_15m.csv",
+        "output_file": "data/eurusd_optimizer_v4_results.csv",
+    },
+}
+
+COMBINED_OUTPUT_FILE = "data/multi_market_optimizer_v4_results.csv"
 
 
 # ============================================================
@@ -81,6 +101,9 @@ HOUR_SETS = [
 
 # ============================================================
 # WALK-FORWARD PERIODS
+#
+# The final two periods deliberately concentrate on the
+# modern market regime.
 # ============================================================
 
 PERIODS = [
@@ -90,6 +113,7 @@ PERIODS = [
         "train_end": "2023-12-31",
         "test_start": "2024-01-01",
         "test_end": "2024-12-31",
+        "era_weight": 1.00,
     },
     {
         "name": "2020-2024 -> 2025",
@@ -97,6 +121,7 @@ PERIODS = [
         "train_end": "2024-12-31",
         "test_start": "2025-01-01",
         "test_end": "2025-12-31",
+        "era_weight": 1.50,
     },
     {
         "name": "2020-2025 -> 2026",
@@ -104,27 +129,30 @@ PERIODS = [
         "train_end": "2025-12-31",
         "test_start": "2026-01-01",
         "test_end": "2026-08-14",
+        "era_weight": 2.00,
     },
 ]
 
 
 # ============================================================
-# LOAD DATA
+# DATA LOADING
 # ============================================================
 
-def load_data():
+def load_data(market, config):
 
+    print()
     print("=" * 60)
-    print("XAUUSD OPTIMIZER V3")
+    print(f"{market} OPTIMIZER V4")
     print("=" * 60)
 
-    if not os.path.exists(DATA_FILE):
+    data_file = config["data_file"]
 
+    if not os.path.exists(data_file):
         raise RuntimeError(
-            f"Missing file: {DATA_FILE}"
+            f"Missing file: {data_file}"
         )
 
-    df = pd.read_csv(DATA_FILE)
+    df = pd.read_csv(data_file)
 
     df.columns = [
         str(c).strip()
@@ -143,14 +171,12 @@ def load_data():
     ]:
 
         if column in df.columns:
-
             time_column = column
             break
 
     if time_column is None:
-
         raise RuntimeError(
-            "Could not find time column."
+            f"{market}: Could not find time column."
         )
 
     df[time_column] = pd.to_datetime(
@@ -192,18 +218,15 @@ def load_data():
     ]:
 
         if column not in df.columns:
-
             raise RuntimeError(
-                f"Missing column: {column}"
+                f"{market}: Missing column: {column}"
             )
 
     df = df.sort_index()
 
-    print(
-        "Candles:",
-        len(df)
-    )
-
+    print()
+    print("Market:", market)
+    print("Candles:", len(df))
     print(
         "Range:",
         df.index.min(),
@@ -234,6 +257,10 @@ def prepare_data(df):
     high_np = high.to_numpy()
     low_np = low.to_numpy()
 
+    # --------------------------------------------------------
+    # EMA
+    # --------------------------------------------------------
+
     ema20 = (
         close
         .ewm(
@@ -256,7 +283,8 @@ def prepare_data(df):
 
     ema20_slope = (
         ema20
-        - np.roll(
+        -
+        np.roll(
             ema20,
             4
         )
@@ -264,7 +292,8 @@ def prepare_data(df):
 
     ema50_slope = (
         ema50
-        - np.roll(
+        -
+        np.roll(
             ema50,
             4
         )
@@ -274,8 +303,13 @@ def prepare_data(df):
         np.abs(
             ema20 - ema50
         )
-        / close_np
+        /
+        close_np
     )
+
+    # --------------------------------------------------------
+    # CANDLE STRUCTURE
+    # --------------------------------------------------------
 
     candle_range = (
         high_np - low_np
@@ -294,7 +328,8 @@ def prepare_data(df):
 
     upper_wick = (
         high_np
-        - np.maximum(
+        -
+        np.maximum(
             open_np,
             close_np
         )
@@ -337,7 +372,6 @@ def prepare_data(df):
     ):
 
         if bearish_cross[i - 1]:
-
             last_cross = i
 
         if last_cross >= 0:
@@ -363,7 +397,8 @@ def prepare_data(df):
     previous_distance = np.divide(
         np.abs(
             previous_close
-            - previous_ema20
+            -
+            previous_ema20
         ),
         previous_close,
         out=np.ones_like(
@@ -375,7 +410,8 @@ def prepare_data(df):
     current_distance = np.divide(
         np.abs(
             close_np
-            - ema20
+            -
+            ema20
         ),
         close_np,
         out=np.ones_like(
@@ -415,8 +451,7 @@ def prepare_data(df):
         "ema50_slope": ema50_slope,
         "separation": separation,
         "body_ratio": body_ratio,
-        "upper_wick_ratio":
-            upper_wick_ratio,
+        "upper_wick_ratio": upper_wick_ratio,
         "hours": hours,
         "cross_age": cross_age,
         "pullback": pullback,
@@ -445,49 +480,58 @@ def build_signals(
         &
         (
             data["ema20"]
-            < data["ema50"]
+            <
+            data["ema50"]
         )
         &
         (
             data["ema20_slope"]
-            < 0
+            <
+            0
         )
         &
         (
             data["ema50_slope"]
-            < 0
+            <
+            0
         )
         &
         (
             data["separation"]
-            >= separation
+            >=
+            separation
         )
         &
         (
             data["cross_age"]
-            <= max_cross
+            <=
+            max_cross
         )
         &
         data["pullback"]
         &
         (
             data["close"]
-            < data["open"]
+            <
+            data["open"]
         )
         &
         (
             data["upper_wick_ratio"]
-            >= wick
+            >=
+            wick
         )
         &
         (
             data["body_ratio"]
-            >= body
+            >=
+            body
         )
         &
         (
             data["close"]
-            < data["ema20"]
+            <
+            data["ema20"]
         )
     )
 
@@ -515,9 +559,7 @@ def simulate(
 
     trades = []
 
-    next_available = (
-        start_index
-    )
+    next_available = start_index
 
     for index in indices:
 
@@ -543,7 +585,8 @@ def simulate(
 
         target = (
             entry
-            - risk * rr
+            -
+            risk * rr
         )
 
         result = None
@@ -559,9 +602,9 @@ def simulate(
             search_end + 1
         ):
 
-            # Conservative assumption:
-            # SL gets priority if both
-            # levels occur in the candle.
+            # Conservative:
+            # if both levels occur inside
+            # the same candle, SL wins.
 
             if high[j] >= stop:
 
@@ -579,9 +622,9 @@ def simulate(
 
         if result is None:
 
-            # Do not manufacture a result
-            # if the trade is still open
-            # at the end of the test window.
+            # Do not manufacture an outcome
+            # for trades still open at the end
+            # of a testing period.
 
             continue
 
@@ -606,7 +649,6 @@ def metrics(
 ):
 
     if not trades:
-
         return None
 
     trades = np.asarray(
@@ -636,8 +678,10 @@ def metrics(
 
     win_rate = (
         win_count
-        / total
-        * 100
+        /
+        total
+        *
+        100
     )
 
     total_r = float(
@@ -658,7 +702,8 @@ def metrics(
 
         profit_factor = (
             gross_profit
-            / gross_loss
+            /
+            gross_loss
         )
 
     else:
@@ -685,9 +730,15 @@ def metrics(
         days / 7
     )
 
-    trades_per_week = (
-        total / weeks
-    )
+    if weeks > 0:
+
+        trades_per_week = (
+            total / weeks
+        )
+
+    else:
+
+        trades_per_week = 0
 
     return {
         "trades": total,
@@ -696,79 +747,235 @@ def metrics(
         "win_rate": win_rate,
         "total_r": total_r,
         "profit_factor": profit_factor,
-        "max_drawdown":
-            max_drawdown,
-        "trades_per_week":
-            trades_per_week,
+        "max_drawdown": max_drawdown,
+        "trades_per_week": trades_per_week,
     }
 
 
 # ============================================================
-# TRAINING SCORE
+# RECENCY WEIGHT
+#
+# Older trades still matter.
+# Recent trades matter more.
+# ============================================================
+
+def calculate_recency_weight(
+    timestamp,
+    train_start,
+    train_end
+):
+
+    total_seconds = (
+        train_end - train_start
+    ).total_seconds()
+
+    elapsed_seconds = (
+        timestamp - train_start
+    ).total_seconds()
+
+    if total_seconds <= 0:
+        return 1.0
+
+    progress = (
+        elapsed_seconds
+        /
+        total_seconds
+    )
+
+    progress = max(
+        0.0,
+        min(
+            1.0,
+            progress
+        )
+    )
+
+    # Older history:
+    # approximately 1.0x
+    #
+    # Most recent history:
+    # approximately 2.0x
+
+    return (
+        1.0
+        +
+        progress
+    )
+
+
+# ============================================================
+# TRAINING SCORE V4
+#
+# Unlike V3, this score:
+#
+#   - rewards positive R
+#   - rewards PF
+#   - penalises drawdown
+#   - requires enough trades
+#   - rewards useful frequency
+#   - favours recent-era performance
 # ============================================================
 
 def training_score(
-    m
+    metrics_full,
+    metrics_recent,
+    era_weight
 ):
 
-    if m is None:
-        return -999999
+    if metrics_full is None:
+        return -999999999
 
-    if m["trades"] < 30:
-        return -999999
+    if metrics_recent is None:
+        return -999999999
 
-    score = 0
+    if metrics_full["trades"] < 30:
+        return -999999999
 
-    # Strong preference for win rate.
+    if metrics_recent["trades"] < 8:
+        return -999999999
+
+    score = 0.0
+
+    # --------------------------------------------------------
+    # FULL HISTORY
+    # --------------------------------------------------------
+
     score += (
-        m["win_rate"] * 10
+        metrics_full["win_rate"]
+        * 5.0
     )
 
-    # Reward positive expectancy.
     score += (
-        m["total_r"] * 2
+        metrics_full["total_r"]
+        * 2.0
     )
 
-    # Reward PF.
     score += (
         min(
-            m["profit_factor"],
-            3
-        ) * 10
+            metrics_full["profit_factor"],
+            3.0
+        )
+        * 10.0
     )
 
-    # Penalise drawdown.
     score -= (
-        m["max_drawdown"] * 2
+        metrics_full["max_drawdown"]
+        * 2.0
     )
 
-    # Prefer useful frequency,
-    # but don't force exactly 1/week.
+    # --------------------------------------------------------
+    # RECENT ERA
+    #
+    # This is deliberately stronger.
+    # --------------------------------------------------------
+
+    score += (
+        metrics_recent["win_rate"]
+        *
+        8.0
+        *
+        era_weight
+    )
+
+    score += (
+        metrics_recent["total_r"]
+        *
+        3.0
+        *
+        era_weight
+    )
+
+    score += (
+        min(
+            metrics_recent["profit_factor"],
+            3.0
+        )
+        *
+        15.0
+        *
+        era_weight
+    )
+
+    score -= (
+        metrics_recent["max_drawdown"]
+        *
+        3.0
+        *
+        era_weight
+    )
+
+    # --------------------------------------------------------
+    # FREQUENCY
+    # --------------------------------------------------------
+
     frequency = (
-        m["trades_per_week"]
+        metrics_recent["trades_per_week"]
     )
 
     if (
-        0.25
+        0.20
         <= frequency
         <= 1.50
     ):
 
-        score += 40
+        score += 30
 
     elif (
-        0.15
+        0.10
         <= frequency
         <= 2.00
     ):
 
-        score += 15
+        score += 10
 
     return score
 
 
 # ============================================================
-# FIND BEST PARAMETERS ON TRAINING DATA
+# FIND INDEX RANGE
+# ============================================================
+
+def get_index_range(
+    timestamps,
+    start_timestamp,
+    end_timestamp
+):
+
+    start_mask = (
+        timestamps
+        >=
+        start_timestamp
+    )
+
+    end_mask = (
+        timestamps
+        <=
+        end_timestamp
+    )
+
+    start_positions = np.flatnonzero(
+        start_mask
+    )
+
+    end_positions = np.flatnonzero(
+        end_mask
+    )
+
+    if (
+        len(start_positions) == 0
+        or
+        len(end_positions) == 0
+    ):
+        return None, None
+
+    return (
+        int(start_positions[0]),
+        int(end_positions[-1])
+    )
+
+
+# ============================================================
+# OPTIMISE TRAINING
 # ============================================================
 
 def optimise_training(
@@ -778,38 +985,60 @@ def optimise_training(
     timestamps,
 ):
 
-    train_start_index = (
-        timestamps
-        >= train_start
+    train_start_index, train_end_index = (
+        get_index_range(
+            timestamps,
+            train_start,
+            train_end
+        )
     )
 
-    train_end_index = (
-        timestamps
-        <= train_end
-    )
-
-    start = np.flatnonzero(
-        train_start_index
-    )[0]
-
-    end = np.flatnonzero(
-        train_end_index
-    )[-1]
+    if train_start_index is None:
+        return None
 
     train_days = (
-        timestamps[end]
-        - timestamps[start]
+        timestamps[train_end_index]
+        -
+        timestamps[train_start_index]
     ).total_seconds() / 86400
 
-    combinations = list(
-        product(
-            RR_VALUES,
-            WICK_VALUES,
-            BODY_VALUES,
-            SEPARATION_VALUES,
-            MAX_CROSS_VALUES,
-            HOUR_SETS,
+    # --------------------------------------------------------
+    # RECENT ERA
+    #
+    # Last 2 years of the training window.
+    # --------------------------------------------------------
+
+    recent_start = max(
+        train_start,
+        train_end
+        -
+        pd.Timedelta(days=730)
+    )
+
+    recent_start_index, recent_end_index = (
+        get_index_range(
+            timestamps,
+            recent_start,
+            train_end
         )
+    )
+
+    if recent_start_index is None:
+        return None
+
+    recent_days = (
+        timestamps[recent_end_index]
+        -
+        timestamps[recent_start_index]
+    ).total_seconds() / 86400
+
+    combinations = product(
+        RR_VALUES,
+        WICK_VALUES,
+        BODY_VALUES,
+        SEPARATION_VALUES,
+        MAX_CROSS_VALUES,
+        HOUR_SETS,
     )
 
     best = None
@@ -834,44 +1063,70 @@ def optimise_training(
             hours,
         )
 
-        trades = simulate(
+        # ----------------------------------------------------
+        # FULL TRAINING
+        # ----------------------------------------------------
+
+        full_trades = simulate(
             data,
             signals,
             rr,
-            start,
-            end,
+            train_start_index,
+            train_end_index,
         )
 
-        m = metrics(
-            trades,
+        full_metrics = metrics(
+            full_trades,
             train_days
         )
 
-        if m is None:
+        if full_metrics is None:
+            continue
+
+        # ----------------------------------------------------
+        # RECENT TRAINING
+        # ----------------------------------------------------
+
+        recent_trades = simulate(
+            data,
+            signals,
+            rr,
+            recent_start_index,
+            recent_end_index,
+        )
+
+        recent_metrics = metrics(
+            recent_trades,
+            recent_days
+        )
+
+        if recent_metrics is None:
             continue
 
         score = training_score(
-            m
+            full_metrics,
+            recent_metrics,
+            2.0
         )
 
         if (
             best is None
-            or score
-            > best["score"]
+            or
+            score > best["score"]
         ):
 
             best = {
                 "score": score,
+
                 "rr": rr,
                 "wick": wick,
                 "body": body,
-                "separation":
-                    separation,
-                "max_cross":
-                    max_cross,
-                "hours":
-                    hours,
-                "metrics": m,
+                "separation": separation,
+                "max_cross": max_cross,
+                "hours": hours,
+
+                "metrics": full_metrics,
+                "recent_metrics": recent_metrics,
             }
 
     return best
@@ -882,6 +1137,7 @@ def optimise_training(
 # ============================================================
 
 def run_period(
+    market,
     period,
     data,
     timestamps,
@@ -920,7 +1176,9 @@ def run_period(
     # --------------------------------------------------------
 
     print()
-    print("Optimising training period...")
+    print(
+        "Optimising training period..."
+    )
 
     best = optimise_training(
         data,
@@ -938,27 +1196,44 @@ def run_period(
         return None
 
     print()
-    print("BEST TRAINING STRATEGY")
+    print(
+        "BEST TRAINING STRATEGY"
+    )
     print("-" * 60)
 
     print(
-        "Win rate:",
+        "Training win rate:",
         f"{best['metrics']['win_rate']:.2f}%"
     )
 
     print(
-        "Trades:",
+        "Training trades:",
         best["metrics"]["trades"]
     )
 
     print(
-        "Total R:",
+        "Training total R:",
         f"{best['metrics']['total_r']:.2f}"
     )
 
     print(
-        "Trades/week:",
-        f"{best['metrics']['trades_per_week']:.2f}"
+        "Recent-era win rate:",
+        f"{best['recent_metrics']['win_rate']:.2f}%"
+    )
+
+    print(
+        "Recent-era trades:",
+        best["recent_metrics"]["trades"]
+    )
+
+    print(
+        "Recent-era total R:",
+        f"{best['recent_metrics']['total_r']:.2f}"
+    )
+
+    print(
+        "Recent-era PF:",
+        f"{best['recent_metrics']['profit_factor']:.2f}"
     )
 
     print()
@@ -1001,27 +1276,26 @@ def run_period(
     # TEST
     # --------------------------------------------------------
 
-    test_start_mask = (
-        timestamps
-        >= test_start
+    test_start_index, test_end_index = (
+        get_index_range(
+            timestamps,
+            test_start,
+            test_end
+        )
     )
 
-    test_end_mask = (
-        timestamps
-        <= test_end
-    )
+    if test_start_index is None:
 
-    test_start_index = np.flatnonzero(
-        test_start_mask
-    )[0]
+        print(
+            "No test data available."
+        )
 
-    test_end_index = np.flatnonzero(
-        test_end_mask
-    )[-1]
+        return None
 
     test_days = (
         timestamps[test_end_index]
-        - timestamps[test_start_index]
+        -
+        timestamps[test_start_index]
     ).total_seconds() / 86400
 
     signals = build_signals(
@@ -1054,12 +1328,25 @@ def run_period(
         )
 
         return {
+            "market": market,
             "period": period["name"],
-            "train_win_rate":
-                best["metrics"]["win_rate"],
             "train_trades":
                 best["metrics"]["trades"],
+            "train_win_rate":
+                best["metrics"]["win_rate"],
+            "train_total_r":
+                best["metrics"]["total_r"],
+            "recent_trades":
+                best["recent_metrics"]["trades"],
+            "recent_win_rate":
+                best["recent_metrics"]["win_rate"],
+            "recent_total_r":
+                best["recent_metrics"]["total_r"],
+            "recent_profit_factor":
+                best["recent_metrics"]["profit_factor"],
             "test_trades": 0,
+            "test_wins": 0,
+            "test_losses": 0,
             "test_win_rate": 0,
             "test_total_r": 0,
             "test_profit_factor": 0,
@@ -1068,19 +1355,18 @@ def run_period(
             "rr": best["rr"],
             "wick": best["wick"],
             "body": best["body"],
-            "separation":
-                best["separation"],
-            "max_cross":
-                best["max_cross"],
-            "hours":
-                ",".join(
-                    str(x)
-                    for x in best["hours"]
-                ),
+            "separation": best["separation"],
+            "max_cross": best["max_cross"],
+            "hours": ",".join(
+                str(x)
+                for x in best["hours"]
+            ),
         }
 
     print()
-    print("OUT-OF-SAMPLE RESULT")
+    print(
+        "OUT-OF-SAMPLE RESULT"
+    )
     print("-" * 60)
 
     print(
@@ -1114,16 +1400,29 @@ def run_period(
     )
 
     return {
+        "market": market,
         "period": period["name"],
-
-        "train_win_rate":
-            best["metrics"]["win_rate"],
 
         "train_trades":
             best["metrics"]["trades"],
 
+        "train_win_rate":
+            best["metrics"]["win_rate"],
+
         "train_total_r":
             best["metrics"]["total_r"],
+
+        "recent_trades":
+            best["recent_metrics"]["trades"],
+
+        "recent_win_rate":
+            best["recent_metrics"]["win_rate"],
+
+        "recent_total_r":
+            best["recent_metrics"]["total_r"],
+
+        "recent_profit_factor":
+            best["recent_metrics"]["profit_factor"],
 
         "test_trades":
             test_metrics["trades"],
@@ -1147,9 +1446,7 @@ def run_period(
             test_metrics["max_drawdown"],
 
         "test_trades_per_week":
-            test_metrics[
-                "trades_per_week"
-            ],
+            test_metrics["trades_per_week"],
 
         "rr":
             best["rr"],
@@ -1175,12 +1472,111 @@ def run_period(
 
 
 # ============================================================
-# MAIN
+# MARKET VERDICT
 # ============================================================
 
-def main():
+def market_verdict(
+    results_df
+):
 
-    df = load_data()
+    if results_df.empty:
+        return "NO DATA"
+
+    profitable_periods = int(
+        (
+            results_df["test_total_r"]
+            > 0
+        ).sum()
+    )
+
+    total_periods = len(
+        results_df
+    )
+
+    total_trades = int(
+        results_df["test_trades"]
+        .sum()
+    )
+
+    total_wins = int(
+        results_df["test_wins"]
+        .sum()
+    )
+
+    total_r = float(
+        results_df["test_total_r"]
+        .sum()
+    )
+
+    if total_trades > 0:
+
+        win_rate = (
+            total_wins
+            /
+            total_trades
+            *
+            100
+        )
+
+    else:
+
+        win_rate = 0
+
+    # Stronger than V3:
+    #
+    # We want:
+    # - positive total R
+    # - majority profitable periods
+    # - at least 55% OOS win rate
+    # - enough trades to have meaning
+
+    if (
+        total_r > 0
+        and
+        profitable_periods
+        >=
+        max(
+            2,
+            int(
+                np.ceil(
+                    total_periods
+                    *
+                    0.66
+                )
+            )
+        )
+        and
+        win_rate >= 55
+        and
+        total_trades >= 20
+    ):
+
+        return "ROBUST"
+
+    if (
+        total_r > 0
+        and
+        win_rate >= 50
+    ):
+
+        return "PROMISING"
+
+    return "NOT ROBUST"
+
+
+# ============================================================
+# RUN ONE MARKET
+# ============================================================
+
+def run_market(
+    market,
+    config
+):
+
+    df = load_data(
+        market,
+        config
+    )
 
     data = prepare_data(
         df
@@ -1192,7 +1588,9 @@ def main():
 
     print()
     print("=" * 60)
-    print("WALK-FORWARD TESTING")
+    print(
+        f"{market} WALK-FORWARD TESTING"
+    )
     print("=" * 60)
 
     print(
@@ -1205,6 +1603,7 @@ def main():
     for period in PERIODS:
 
         result = run_period(
+            market,
             period,
             data,
             timestamps,
@@ -1219,7 +1618,7 @@ def main():
     if not results:
 
         raise RuntimeError(
-            "No walk-forward results."
+            f"{market}: No walk-forward results."
         )
 
     results_df = pd.DataFrame(
@@ -1232,23 +1631,28 @@ def main():
     )
 
     results_df.to_csv(
-        OUTPUT_FILE,
+        config["output_file"],
         index=False
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # SUMMARY
-    # ========================================================
+    # --------------------------------------------------------
 
     print()
     print("=" * 60)
-    print("WALK-FORWARD SUMMARY")
+    print(
+        f"{market} WALK-FORWARD SUMMARY"
+    )
     print("=" * 60)
 
     summary_columns = [
         "period",
         "train_trades",
         "train_win_rate",
+        "recent_trades",
+        "recent_win_rate",
+        "recent_total_r",
         "test_trades",
         "test_win_rate",
         "test_total_r",
@@ -1265,9 +1669,9 @@ def main():
         )
     )
 
-    # ========================================================
-    # COMBINED OUT-OF-SAMPLE
-    # ========================================================
+    # --------------------------------------------------------
+    # COMBINED OOS
+    # --------------------------------------------------------
 
     total_test_trades = int(
         results_df[
@@ -1297,8 +1701,10 @@ def main():
 
         combined_win_rate = (
             total_test_wins
-            / total_test_trades
-            * 100
+            /
+            total_test_trades
+            *
+            100
         )
 
     else:
@@ -1318,10 +1724,9 @@ def main():
             "test_losses"
         ]
 
-        # Reconstruct approximate gross
-        # profit/loss from fixed RR.
-
-        rr = row["rr"]
+        rr = row[
+            "rr"
+        ]
 
         gross_profit += (
             wins * rr
@@ -1335,16 +1740,28 @@ def main():
 
         combined_pf = (
             gross_profit
-            / gross_loss
+            /
+            gross_loss
         )
 
     else:
 
         combined_pf = 999
 
+    profitable_periods = int(
+        (
+            results_df[
+                "test_total_r"
+            ]
+            > 0
+        ).sum()
+    )
+
     print()
     print("=" * 60)
-    print("COMBINED OUT-OF-SAMPLE RESULT")
+    print(
+        f"{market} COMBINED OUT-OF-SAMPLE"
+    )
     print("=" * 60)
 
     print(
@@ -1377,84 +1794,42 @@ def main():
         f"{combined_pf:.2f}"
     )
 
-    # ========================================================
-    # VERDICT
-    # ========================================================
+    print(
+        "Profitable periods:",
+        f"{profitable_periods}/{len(results_df)}"
+    )
+
+    verdict = market_verdict(
+        results_df
+    )
 
     print()
     print("=" * 60)
-    print("ROBUSTNESS VERDICT")
+    print(
+        f"{market} VERDICT"
+    )
     print("=" * 60)
 
-    profitable_periods = int(
-        (
-            results_df[
-                "test_total_r"
-            ] > 0
-        ).sum()
-    )
-
-    positive_win_periods = int(
-        (
-            results_df[
-                "test_win_rate"
-            ] >= 50
-        ).sum()
-    )
-
     print(
-        "Profitable test periods:",
-        f"{profitable_periods}/"
-        f"{len(results_df)}"
+        "VERDICT:",
+        verdict
     )
 
-    print(
-        "Test periods >=50% win rate:",
-        f"{positive_win_periods}/"
-        f"{len(results_df)}"
-    )
+    if verdict == "ROBUST":
 
-    if (
-        combined_win_rate >= 70
-        and
-        total_test_r > 0
-        and
-        profitable_periods
-        == len(results_df)
-    ):
-
-        print()
         print(
-            "VERDICT: STRONG"
+            "This market has passed the "
+            "current preliminary robustness filter."
         )
 
-        print(
-            "The strategy has passed a"
-            " preliminary walk-forward test."
-        )
-
-    elif (
-        combined_win_rate >= 60
-        and
-        total_test_r > 0
-    ):
-
-        print()
-        print(
-            "VERDICT: PROMISING"
-        )
+    elif verdict == "PROMISING":
 
         print(
-            "The strategy shows an edge,"
-            " but needs further refinement."
+            "This market shows potential "
+            "but requires further testing."
         )
 
     else:
-
-        print()
-        print(
-            "VERDICT: NOT ROBUST YET"
-        )
 
         print(
             "Do not implement this version live."
@@ -1463,12 +1838,193 @@ def main():
     print()
     print(
         "Results saved to:",
-        OUTPUT_FILE
+        config["output_file"]
+    )
+
+    return results_df
+
+
+# ============================================================
+# COMPARE MARKETS
+# ============================================================
+
+def compare_markets(
+    market_results
+):
+
+    rows = []
+
+    for market, df in market_results.items():
+
+        total_trades = int(
+            df["test_trades"].sum()
+        )
+
+        total_wins = int(
+            df["test_wins"].sum()
+        )
+
+        total_r = float(
+            df["test_total_r"].sum()
+        )
+
+        profitable_periods = int(
+            (
+                df["test_total_r"]
+                > 0
+            ).sum()
+        )
+
+        if total_trades > 0:
+
+            win_rate = (
+                total_wins
+                /
+                total_trades
+                *
+                100
+            )
+
+        else:
+
+            win_rate = 0
+
+        rows.append(
+            {
+                "market": market,
+                "test_trades": total_trades,
+                "test_win_rate": win_rate,
+                "test_total_r": total_r,
+                "profitable_periods":
+                    profitable_periods,
+                "periods":
+                    len(df),
+                "verdict":
+                    market_verdict(df),
+            }
+        )
+
+    comparison = pd.DataFrame(
+        rows
+    )
+
+    comparison.to_csv(
+        COMBINED_OUTPUT_FILE,
+        index=False
     )
 
     print()
     print("=" * 60)
-    print("OPTIMIZER V3 COMPLETE")
+    print(
+        "MULTI-MARKET COMPARISON"
+    )
+    print("=" * 60)
+
+    print(
+        comparison.to_string(
+            index=False
+        )
+    )
+
+    print()
+    print("=" * 60)
+    print(
+        "IMPORTANT"
+    )
+    print("=" * 60)
+
+    print(
+        "A strategy is NOT considered validated "
+        "just because one market performs well."
+    )
+
+    print(
+        "We want an edge that survives different "
+        "market regimes and preferably different instruments."
+    )
+
+    print()
+    print(
+        "Comparison saved to:",
+        COMBINED_OUTPUT_FILE
+    )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+
+    print()
+    print("=" * 60)
+    print(
+        "MULTI-MARKET STRATEGY OPTIMIZER V4"
+    )
+    print("=" * 60)
+
+    print()
+    print(
+        "Current-era weighting: ENABLED"
+    )
+
+    print(
+        "Markets:",
+        ", ".join(
+            MARKETS.keys()
+        )
+    )
+
+    print()
+    print(
+        "NO LIVE TRADING"
+    )
+
+    market_results = {}
+
+    for market, config in MARKETS.items():
+
+        try:
+
+            results_df = run_market(
+                market,
+                config
+            )
+
+            market_results[
+                market
+            ] = results_df
+
+        except Exception as error:
+
+            print()
+            print("=" * 60)
+            print(
+                f"{market} FAILED"
+            )
+            print("=" * 60)
+
+            print(
+                type(error).__name__,
+                ":",
+                error
+            )
+
+    if not market_results:
+
+        raise RuntimeError(
+            "No markets completed successfully."
+        )
+
+    compare_markets(
+        market_results
+    )
+
+    print()
+    print("=" * 60)
+    print(
+        "OPTIMIZER V4 COMPLETE"
+    )
     print("=" * 60)
 
 
