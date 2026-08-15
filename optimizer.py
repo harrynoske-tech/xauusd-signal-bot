@@ -5,19 +5,18 @@ from itertools import product
 
 
 # ============================================================
-# XAUUSD OPTIMIZER V2
+# XAUUSD OPTIMIZER V3
 #
-# Goal:
-# Find the highest-quality strategy around ~1 trade/week
-# while requiring a meaningful number of historical trades.
+# WALK-FORWARD / OUT-OF-SAMPLE TESTING
 #
-# IMPORTANT:
-# This optimizer is research only.
-# It does NOT place live trades.
+# We optimise on one period, then test those exact parameters
+# on completely unseen future data.
+#
+# NO LIVE TRADING.
 # ============================================================
 
 DATA_FILE = "data/XAUUSD_15m.csv"
-OUTPUT_FILE = "data/optimizer_results_v2.csv"
+OUTPUT_FILE = "data/optimizer_v3_results.csv"
 
 
 # ============================================================
@@ -41,7 +40,6 @@ WICK_VALUES = [
     0.35,
     0.40,
     0.45,
-    0.50,
 ]
 
 BODY_VALUES = [
@@ -50,7 +48,6 @@ BODY_VALUES = [
     0.30,
     0.35,
     0.40,
-    0.45,
 ]
 
 SEPARATION_VALUES = [
@@ -63,7 +60,6 @@ SEPARATION_VALUES = [
 ]
 
 MAX_CROSS_VALUES = [
-    10,
     15,
     20,
     25,
@@ -78,9 +74,37 @@ HOUR_SETS = [
     (2, 3, 4),
     (3, 4, 5),
     (2, 3, 4, 5),
-    (2, 3, 4, 5, 12),
     (2, 3, 4, 5, 12, 13),
     (3, 4, 5, 12, 13),
+]
+
+
+# ============================================================
+# WALK-FORWARD PERIODS
+# ============================================================
+
+PERIODS = [
+    {
+        "name": "2020-2023 -> 2024",
+        "train_start": "2020-01-01",
+        "train_end": "2023-12-31",
+        "test_start": "2024-01-01",
+        "test_end": "2024-12-31",
+    },
+    {
+        "name": "2020-2024 -> 2025",
+        "train_start": "2020-01-01",
+        "train_end": "2024-12-31",
+        "test_start": "2025-01-01",
+        "test_end": "2025-12-31",
+    },
+    {
+        "name": "2020-2025 -> 2026",
+        "train_start": "2020-01-01",
+        "train_end": "2025-12-31",
+        "test_start": "2026-01-01",
+        "test_end": "2026-08-14",
+    },
 ]
 
 
@@ -91,7 +115,7 @@ HOUR_SETS = [
 def load_data():
 
     print("=" * 60)
-    print("XAUUSD OPTIMIZER V2")
+    print("XAUUSD OPTIMIZER V3")
     print("=" * 60)
 
     if not os.path.exists(DATA_FILE):
@@ -160,14 +184,12 @@ def load_data():
         columns=rename
     )
 
-    required = [
+    for column in [
         "Open",
         "High",
         "Low",
         "Close",
-    ]
-
-    for column in required:
+    ]:
 
         if column not in df.columns:
 
@@ -193,13 +215,14 @@ def load_data():
 
 
 # ============================================================
-# PREPARE DATA
+# PREPARE INDICATORS
 # ============================================================
 
 def prepare_data(df):
 
-    print()
-    print("Preparing indicators...")
+    print(
+        "Preparing indicators..."
+    )
 
     close = df["Close"].astype(float)
     open_price = df["Open"].astype(float)
@@ -210,10 +233,6 @@ def prepare_data(df):
     open_np = open_price.to_numpy()
     high_np = high.to_numpy()
     low_np = low.to_numpy()
-
-    # --------------------------------------------------------
-    # EMA
-    # --------------------------------------------------------
 
     ema20 = (
         close
@@ -235,10 +254,6 @@ def prepare_data(df):
         .to_numpy()
     )
 
-    # --------------------------------------------------------
-    # EMA SLOPES
-    # --------------------------------------------------------
-
     ema20_slope = (
         ema20
         - np.roll(
@@ -255,20 +270,12 @@ def prepare_data(df):
         )
     )
 
-    # --------------------------------------------------------
-    # EMA SEPARATION
-    # --------------------------------------------------------
-
     separation = (
         np.abs(
             ema20 - ema50
         )
         / close_np
     )
-
-    # --------------------------------------------------------
-    # CANDLE STRUCTURE
-    # --------------------------------------------------------
 
     candle_range = (
         high_np - low_np
@@ -302,16 +309,12 @@ def prepare_data(df):
         where=candle_range > 0
     )
 
-    # --------------------------------------------------------
-    # HOUR
-    # --------------------------------------------------------
-
     hours = (
         df.index.hour.to_numpy()
     )
 
     # --------------------------------------------------------
-    # BEARISH EMA CROSS AGE
+    # BEARISH CROSS AGE
     # --------------------------------------------------------
 
     bearish_cross = (
@@ -388,7 +391,7 @@ def prepare_data(df):
     )
 
     # --------------------------------------------------------
-    # STRUCTURAL STOP
+    # STOP
     # --------------------------------------------------------
 
     recent_high = (
@@ -399,11 +402,6 @@ def prepare_data(df):
         )
         .max()
         .to_numpy()
-    )
-
-    risk = (
-        recent_high
-        - close_np
     )
 
     return {
@@ -417,35 +415,33 @@ def prepare_data(df):
         "ema50_slope": ema50_slope,
         "separation": separation,
         "body_ratio": body_ratio,
-        "upper_wick_ratio": upper_wick_ratio,
+        "upper_wick_ratio":
+            upper_wick_ratio,
         "hours": hours,
         "cross_age": cross_age,
         "pullback": pullback,
         "recent_high": recent_high,
-        "risk": risk,
     }
 
 
 # ============================================================
-# BASE SIGNAL
+# BUILD SIGNALS
 # ============================================================
 
-def build_signal_mask(
+def build_signals(
     data,
     wick,
     body,
     separation,
     max_cross,
-    hours
+    hours,
 ):
 
-    hour_mask = np.isin(
-        data["hours"],
-        np.array(hours)
-    )
-
     mask = (
-        hour_mask
+        np.isin(
+            data["hours"],
+            np.array(hours)
+        )
         &
         (
             data["ema20"]
@@ -501,27 +497,35 @@ def build_signal_mask(
 
 
 # ============================================================
-# RUN STRATEGY
+# SIMULATE TRADES
 # ============================================================
 
-def run_strategy(
+def simulate(
     data,
     indices,
-    rr
+    rr,
+    start_index,
+    end_index,
 ):
 
     close = data["close"]
     high = data["high"]
-
-    recent_high = (
-        data["recent_high"]
-    )
+    low = data["low"]
+    recent_high = data["recent_high"]
 
     trades = []
 
-    next_available = 0
+    next_available = (
+        start_index
+    )
 
     for index in indices:
+
+        if index < start_index:
+            continue
+
+        if index > end_index:
+            break
 
         if index < next_available:
             continue
@@ -543,30 +547,30 @@ def run_strategy(
         )
 
         result = None
-
         exit_index = None
+
+        search_end = min(
+            end_index,
+            len(close) - 1
+        )
 
         for j in range(
             index + 1,
-            len(close)
+            search_end + 1
         ):
 
-            candle_high = high[j]
-            candle_low = (
-                data["low"][j]
-            )
+            # Conservative assumption:
+            # SL gets priority if both
+            # levels occur in the candle.
 
-            # Conservative:
-            # if SL and TP occur in same
-            # candle, count SL first.
-            if candle_high >= stop:
+            if high[j] >= stop:
 
                 result = -1.0
                 exit_index = j
 
                 break
 
-            if candle_low <= target:
+            if low[j] <= target:
 
                 result = rr
                 exit_index = j
@@ -574,6 +578,11 @@ def run_strategy(
                 break
 
         if result is None:
+
+            # Do not manufacture a result
+            # if the trade is still open
+            # at the end of the test window.
+
             continue
 
         trades.append(
@@ -591,21 +600,18 @@ def run_strategy(
 # METRICS
 # ============================================================
 
-def calculate_metrics(
+def metrics(
     trades,
-    total_days
+    days
 ):
 
     if not trades:
+
         return None
 
     trades = np.asarray(
         trades,
         dtype=float
-    )
-
-    total_trades = len(
-        trades
     )
 
     wins = (
@@ -614,6 +620,10 @@ def calculate_metrics(
 
     losses = (
         trades < 0
+    )
+
+    total = len(
+        trades
     )
 
     win_count = int(
@@ -626,7 +636,7 @@ def calculate_metrics(
 
     win_rate = (
         win_count
-        / total_trades
+        / total
         * 100
     )
 
@@ -659,12 +669,12 @@ def calculate_metrics(
         trades
     )
 
-    running_peak = np.maximum.accumulate(
+    peak = np.maximum.accumulate(
         equity
     )
 
     drawdown = (
-        running_peak - equity
+        peak - equity
     )
 
     max_drawdown = float(
@@ -672,166 +682,496 @@ def calculate_metrics(
     )
 
     weeks = (
-        total_days / 7
+        days / 7
     )
 
     trades_per_week = (
-        total_trades
-        / weeks
+        total / weeks
     )
-
-    expectancy = (
-        total_r
-        / total_trades
-    )
-
-    # --------------------------------------------------------
-    # LONGEST LOSING STREAK
-    # --------------------------------------------------------
-
-    longest_loss_streak = 0
-    current_loss_streak = 0
-
-    for result in trades:
-
-        if result < 0:
-
-            current_loss_streak += 1
-
-            longest_loss_streak = max(
-                longest_loss_streak,
-                current_loss_streak
-            )
-
-        else:
-
-            current_loss_streak = 0
 
     return {
-        "trades": total_trades,
+        "trades": total,
         "wins": win_count,
         "losses": loss_count,
         "win_rate": win_rate,
         "total_r": total_r,
         "profit_factor": profit_factor,
-        "expectancy": expectancy,
-        "trades_per_week": trades_per_week,
-        "max_drawdown": max_drawdown,
-        "longest_loss_streak":
-            longest_loss_streak,
+        "max_drawdown":
+            max_drawdown,
+        "trades_per_week":
+            trades_per_week,
     }
 
 
 # ============================================================
-# RANKING
+# TRAINING SCORE
 # ============================================================
 
-def rank_strategy(
-    metrics
+def training_score(
+    m
 ):
 
-    trades = metrics["trades"]
-    win_rate = metrics["win_rate"]
-    total_r = metrics["total_r"]
-    drawdown = metrics["max_drawdown"]
-    trades_per_week = (
-        metrics["trades_per_week"]
-    )
-
-    # --------------------------------------------------------
-    # HARD SAMPLE FILTER
-    # --------------------------------------------------------
-
-    if trades < 50:
+    if m is None:
         return -999999
 
-    # --------------------------------------------------------
-    # PRIMARY OBJECTIVE:
-    #
-    # Get close to ONE trade/week.
-    # But do NOT reward extremely rare systems.
-    # --------------------------------------------------------
+    if m["trades"] < 30:
+        return -999999
+
+    score = 0
+
+    # Strong preference for win rate.
+    score += (
+        m["win_rate"] * 10
+    )
+
+    # Reward positive expectancy.
+    score += (
+        m["total_r"] * 2
+    )
+
+    # Reward PF.
+    score += (
+        min(
+            m["profit_factor"],
+            3
+        ) * 10
+    )
+
+    # Penalise drawdown.
+    score -= (
+        m["max_drawdown"] * 2
+    )
+
+    # Prefer useful frequency,
+    # but don't force exactly 1/week.
+    frequency = (
+        m["trades_per_week"]
+    )
 
     if (
-        0.50
-        <= trades_per_week
+        0.25
+        <= frequency
         <= 1.50
     ):
 
-        frequency_score = 100
+        score += 40
 
     elif (
-        0.25
-        <= trades_per_week
-        < 0.50
+        0.15
+        <= frequency
+        <= 2.00
     ):
 
-        frequency_score = 50
-
-    elif (
-        1.50
-        < trades_per_week
-        <= 2.50
-    ):
-
-        frequency_score = 50
-
-    else:
-
-        frequency_score = 0
-
-    # --------------------------------------------------------
-    # WIN RATE DOMINATES
-    # --------------------------------------------------------
-
-    score = (
-        win_rate * 10
-    )
-
-    # --------------------------------------------------------
-    # PROFITABILITY
-    # --------------------------------------------------------
-
-    score += (
-        total_r * 2
-    )
-
-    # --------------------------------------------------------
-    # PROFIT FACTOR
-    # --------------------------------------------------------
-
-    score += (
-        min(
-            metrics["profit_factor"],
-            3
-        )
-        * 10
-    )
-
-    # --------------------------------------------------------
-    # DRAWDOWN
-    # --------------------------------------------------------
-
-    score -= (
-        drawdown * 2
-    )
-
-    # --------------------------------------------------------
-    # FREQUENCY
-    # --------------------------------------------------------
-
-    score += frequency_score
-
-    # --------------------------------------------------------
-    # SAMPLE SIZE
-    # --------------------------------------------------------
-
-    score += min(
-        trades,
-        500
-    ) * 0.05
+        score += 15
 
     return score
+
+
+# ============================================================
+# FIND BEST PARAMETERS ON TRAINING DATA
+# ============================================================
+
+def optimise_training(
+    data,
+    train_start,
+    train_end,
+    timestamps,
+):
+
+    train_start_index = (
+        timestamps
+        >= train_start
+    )
+
+    train_end_index = (
+        timestamps
+        <= train_end
+    )
+
+    start = np.flatnonzero(
+        train_start_index
+    )[0]
+
+    end = np.flatnonzero(
+        train_end_index
+    )[-1]
+
+    train_days = (
+        timestamps[end]
+        - timestamps[start]
+    ).total_seconds() / 86400
+
+    combinations = list(
+        product(
+            RR_VALUES,
+            WICK_VALUES,
+            BODY_VALUES,
+            SEPARATION_VALUES,
+            MAX_CROSS_VALUES,
+            HOUR_SETS,
+        )
+    )
+
+    best = None
+
+    for params in combinations:
+
+        (
+            rr,
+            wick,
+            body,
+            separation,
+            max_cross,
+            hours,
+        ) = params
+
+        signals = build_signals(
+            data,
+            wick,
+            body,
+            separation,
+            max_cross,
+            hours,
+        )
+
+        trades = simulate(
+            data,
+            signals,
+            rr,
+            start,
+            end,
+        )
+
+        m = metrics(
+            trades,
+            train_days
+        )
+
+        if m is None:
+            continue
+
+        score = training_score(
+            m
+        )
+
+        if (
+            best is None
+            or score
+            > best["score"]
+        ):
+
+            best = {
+                "score": score,
+                "rr": rr,
+                "wick": wick,
+                "body": body,
+                "separation":
+                    separation,
+                "max_cross":
+                    max_cross,
+                "hours":
+                    hours,
+                "metrics": m,
+            }
+
+    return best
+
+
+# ============================================================
+# RUN ONE WALK-FORWARD PERIOD
+# ============================================================
+
+def run_period(
+    period,
+    data,
+    timestamps,
+):
+
+    print()
+    print("=" * 60)
+    print(
+        "WALK-FORWARD:",
+        period["name"]
+    )
+    print("=" * 60)
+
+    train_start = pd.Timestamp(
+        period["train_start"],
+        tz="UTC"
+    )
+
+    train_end = pd.Timestamp(
+        period["train_end"],
+        tz="UTC"
+    )
+
+    test_start = pd.Timestamp(
+        period["test_start"],
+        tz="UTC"
+    )
+
+    test_end = pd.Timestamp(
+        period["test_end"],
+        tz="UTC"
+    )
+
+    # --------------------------------------------------------
+    # TRAIN
+    # --------------------------------------------------------
+
+    print()
+    print("Optimising training period...")
+
+    best = optimise_training(
+        data,
+        train_start,
+        train_end,
+        timestamps,
+    )
+
+    if best is None:
+
+        print(
+            "No valid training strategy."
+        )
+
+        return None
+
+    print()
+    print("BEST TRAINING STRATEGY")
+    print("-" * 60)
+
+    print(
+        "Win rate:",
+        f"{best['metrics']['win_rate']:.2f}%"
+    )
+
+    print(
+        "Trades:",
+        best["metrics"]["trades"]
+    )
+
+    print(
+        "Total R:",
+        f"{best['metrics']['total_r']:.2f}"
+    )
+
+    print(
+        "Trades/week:",
+        f"{best['metrics']['trades_per_week']:.2f}"
+    )
+
+    print()
+    print("Parameters:")
+
+    print(
+        "RR:",
+        best["rr"]
+    )
+
+    print(
+        "Wick:",
+        best["wick"]
+    )
+
+    print(
+        "Body:",
+        best["body"]
+    )
+
+    print(
+        "Separation:",
+        best["separation"]
+    )
+
+    print(
+        "Max cross:",
+        best["max_cross"]
+    )
+
+    print(
+        "Hours:",
+        ",".join(
+            str(x)
+            for x in best["hours"]
+        )
+    )
+
+    # --------------------------------------------------------
+    # TEST
+    # --------------------------------------------------------
+
+    test_start_mask = (
+        timestamps
+        >= test_start
+    )
+
+    test_end_mask = (
+        timestamps
+        <= test_end
+    )
+
+    test_start_index = np.flatnonzero(
+        test_start_mask
+    )[0]
+
+    test_end_index = np.flatnonzero(
+        test_end_mask
+    )[-1]
+
+    test_days = (
+        timestamps[test_end_index]
+        - timestamps[test_start_index]
+    ).total_seconds() / 86400
+
+    signals = build_signals(
+        data,
+        best["wick"],
+        best["body"],
+        best["separation"],
+        best["max_cross"],
+        best["hours"],
+    )
+
+    test_trades = simulate(
+        data,
+        signals,
+        best["rr"],
+        test_start_index,
+        test_end_index,
+    )
+
+    test_metrics = metrics(
+        test_trades,
+        test_days
+    )
+
+    if test_metrics is None:
+
+        print()
+        print(
+            "NO OUT-OF-SAMPLE TRADES"
+        )
+
+        return {
+            "period": period["name"],
+            "train_win_rate":
+                best["metrics"]["win_rate"],
+            "train_trades":
+                best["metrics"]["trades"],
+            "test_trades": 0,
+            "test_win_rate": 0,
+            "test_total_r": 0,
+            "test_profit_factor": 0,
+            "test_drawdown": 0,
+            "test_trades_per_week": 0,
+            "rr": best["rr"],
+            "wick": best["wick"],
+            "body": best["body"],
+            "separation":
+                best["separation"],
+            "max_cross":
+                best["max_cross"],
+            "hours":
+                ",".join(
+                    str(x)
+                    for x in best["hours"]
+                ),
+        }
+
+    print()
+    print("OUT-OF-SAMPLE RESULT")
+    print("-" * 60)
+
+    print(
+        "Win rate:",
+        f"{test_metrics['win_rate']:.2f}%"
+    )
+
+    print(
+        "Trades:",
+        test_metrics["trades"]
+    )
+
+    print(
+        "Total R:",
+        f"{test_metrics['total_r']:.2f}"
+    )
+
+    print(
+        "Profit factor:",
+        f"{test_metrics['profit_factor']:.2f}"
+    )
+
+    print(
+        "Max drawdown:",
+        f"{test_metrics['max_drawdown']:.2f}R"
+    )
+
+    print(
+        "Trades/week:",
+        f"{test_metrics['trades_per_week']:.2f}"
+    )
+
+    return {
+        "period": period["name"],
+
+        "train_win_rate":
+            best["metrics"]["win_rate"],
+
+        "train_trades":
+            best["metrics"]["trades"],
+
+        "train_total_r":
+            best["metrics"]["total_r"],
+
+        "test_trades":
+            test_metrics["trades"],
+
+        "test_wins":
+            test_metrics["wins"],
+
+        "test_losses":
+            test_metrics["losses"],
+
+        "test_win_rate":
+            test_metrics["win_rate"],
+
+        "test_total_r":
+            test_metrics["total_r"],
+
+        "test_profit_factor":
+            test_metrics["profit_factor"],
+
+        "test_drawdown":
+            test_metrics["max_drawdown"],
+
+        "test_trades_per_week":
+            test_metrics[
+                "trades_per_week"
+            ],
+
+        "rr":
+            best["rr"],
+
+        "wick":
+            best["wick"],
+
+        "body":
+            best["body"],
+
+        "separation":
+            best["separation"],
+
+        "max_cross":
+            best["max_cross"],
+
+        "hours":
+            ",".join(
+                str(x)
+                for x in best["hours"]
+            ),
+    }
 
 
 # ============================================================
@@ -846,141 +1186,44 @@ def main():
         df
     )
 
-    total_days = (
-        df.index.max()
-        - df.index.min()
-    ).total_seconds() / 86400
-
-    combinations = list(
-        product(
-            RR_VALUES,
-            WICK_VALUES,
-            BODY_VALUES,
-            SEPARATION_VALUES,
-            MAX_CROSS_VALUES,
-            HOUR_SETS,
-        )
+    timestamps = (
+        df.index.to_numpy()
     )
 
     print()
     print("=" * 60)
-    print("OPTIMIZER V2 STARTING")
+    print("WALK-FORWARD TESTING")
     print("=" * 60)
 
     print(
-        "Total combinations:",
-        len(combinations)
+        "Periods:",
+        len(PERIODS)
     )
-
-    print()
 
     results = []
 
-    for number, params in enumerate(
-        combinations,
-        start=1
-    ):
+    for period in PERIODS:
 
-        (
-            rr,
-            wick,
-            body,
-            separation,
-            max_cross,
-            hours,
-        ) = params
-
-        indices = build_signal_mask(
+        result = run_period(
+            period,
             data,
-            wick,
-            body,
-            separation,
-            max_cross,
-            hours
+            timestamps,
         )
 
-        if len(indices) == 0:
-            continue
+        if result is not None:
 
-        trades = run_strategy(
-            data,
-            indices,
-            rr
-        )
-
-        metrics = calculate_metrics(
-            trades,
-            total_days
-        )
-
-        if metrics is None:
-            continue
-
-        metrics.update({
-
-            "rr": rr,
-
-            "wick": wick,
-
-            "body": body,
-
-            "separation":
-                separation,
-
-            "max_cross":
-                max_cross,
-
-            "hours":
-                ",".join(
-                    str(x)
-                    for x in hours
-                ),
-
-        })
-
-        metrics[
-            "optimizer_score"
-        ] = rank_strategy(
-            metrics
-        )
-
-        results.append(
-            metrics
-        )
-
-        if (
-            number == 1
-            or number % 250 == 0
-        ):
-
-            print(
-                f"Progress: "
-                f"{number}/"
-                f"{len(combinations)} "
-                f"| valid: "
-                f"{len(results)}",
-                flush=True
+            results.append(
+                result
             )
 
     if not results:
 
         raise RuntimeError(
-            "No valid strategies found."
+            "No walk-forward results."
         )
 
     results_df = pd.DataFrame(
         results
-    )
-
-    results_df = (
-        results_df
-        .sort_values(
-            "optimizer_score",
-            ascending=False
-        )
-        .reset_index(
-            drop=True
-        )
     )
 
     os.makedirs(
@@ -993,427 +1236,239 @@ def main():
         index=False
     )
 
-    columns = [
-        "trades",
-        "trades_per_week",
-        "win_rate",
-        "total_r",
-        "profit_factor",
-        "max_drawdown",
-        "longest_loss_streak",
-        "rr",
-        "wick",
-        "body",
-        "separation",
-        "max_cross",
-        "hours",
+    # ========================================================
+    # SUMMARY
+    # ========================================================
+
+    print()
+    print("=" * 60)
+    print("WALK-FORWARD SUMMARY")
+    print("=" * 60)
+
+    summary_columns = [
+        "period",
+        "train_trades",
+        "train_win_rate",
+        "test_trades",
+        "test_win_rate",
+        "test_total_r",
+        "test_profit_factor",
+        "test_drawdown",
+        "test_trades_per_week",
     ]
 
-    # ========================================================
-    # TOP OVERALL
-    # ========================================================
-
-    print()
-    print("=" * 60)
-    print("TOP 20 STRATEGIES")
-    print("=" * 60)
-
     print(
         results_df[
-            columns
-        ]
-        .head(20)
-        .to_string(
-            index=False
-        )
-    )
-
-    # ========================================================
-    # BEST WIN RATE — 50+
-    # ========================================================
-
-    best_50 = (
-        results_df[
-            results_df["trades"] >= 50
-        ]
-        .sort_values(
-            [
-                "win_rate",
-                "total_r"
-            ],
-            ascending=False
-        )
-        .head(10)
-    )
-
-    print()
-    print("=" * 60)
-    print("BEST WIN RATE — MIN 50 TRADES")
-    print("=" * 60)
-
-    print(
-        best_50[
-            columns
+            summary_columns
         ].to_string(
             index=False
         )
     )
 
     # ========================================================
-    # BEST WIN RATE — 100+
+    # COMBINED OUT-OF-SAMPLE
     # ========================================================
 
-    best_100 = (
+    total_test_trades = int(
         results_df[
-            results_df["trades"] >= 100
-        ]
-        .sort_values(
-            [
-                "win_rate",
-                "total_r"
-            ],
-            ascending=False
-        )
-        .head(10)
+            "test_trades"
+        ].sum()
     )
 
-    print()
-    print("=" * 60)
-    print("BEST WIN RATE — MIN 100 TRADES")
-    print("=" * 60)
+    total_test_wins = int(
+        results_df[
+            "test_wins"
+        ].sum()
+    )
 
-    if len(best_100):
+    total_test_losses = int(
+        results_df[
+            "test_losses"
+        ].sum()
+    )
 
-        print(
-            best_100[
-                columns
-            ].to_string(
-                index=False
-            )
+    total_test_r = float(
+        results_df[
+            "test_total_r"
+        ].sum()
+    )
+
+    if total_test_trades > 0:
+
+        combined_win_rate = (
+            total_test_wins
+            / total_test_trades
+            * 100
         )
 
     else:
 
-        print(
-            "No strategies with 100+ trades."
-        )
+        combined_win_rate = 0
 
-    # ========================================================
-    # BEST WIN RATE — 200+
-    # ========================================================
+    gross_profit = 0
+    gross_loss = 0
 
-    best_200 = (
-        results_df[
-            results_df["trades"] >= 200
+    for _, row in results_df.iterrows():
+
+        wins = row[
+            "test_wins"
         ]
-        .sort_values(
-            [
-                "win_rate",
-                "total_r"
-            ],
-            ascending=False
+
+        losses = row[
+            "test_losses"
+        ]
+
+        # Reconstruct approximate gross
+        # profit/loss from fixed RR.
+
+        rr = row["rr"]
+
+        gross_profit += (
+            wins * rr
         )
-        .head(10)
-    )
 
-    print()
-    print("=" * 60)
-    print("BEST WIN RATE — MIN 200 TRADES")
-    print("=" * 60)
+        gross_loss += (
+            losses * 1.0
+        )
 
-    if len(best_200):
+    if gross_loss > 0:
 
-        print(
-            best_200[
-                columns
-            ].to_string(
-                index=False
-            )
+        combined_pf = (
+            gross_profit
+            / gross_loss
         )
 
     else:
 
-        print(
-            "No strategies with 200+ trades."
-        )
-
-    # ========================================================
-    # 0.5–1.5 TRADES/WEEK
-    # ========================================================
-
-    near_one = (
-        results_df[
-            (
-                results_df[
-                    "trades_per_week"
-                ] >= 0.50
-            )
-            &
-            (
-                results_df[
-                    "trades_per_week"
-                ] <= 1.50
-            )
-            &
-            (
-                results_df[
-                    "trades"
-                ] >= 50
-            )
-        ]
-        .sort_values(
-            [
-                "win_rate",
-                "total_r"
-            ],
-            ascending=False
-        )
-        .head(20)
-    )
+        combined_pf = 999
 
     print()
     print("=" * 60)
-    print(
-        "BEST WIN RATE — 0.5 TO 1.5 "
-        "TRADES/WEEK"
-    )
+    print("COMBINED OUT-OF-SAMPLE RESULT")
     print("=" * 60)
 
-    if len(near_one):
-
-        print(
-            near_one[
-                columns
-            ].to_string(
-                index=False
-            )
-        )
-
-    else:
-
-        print(
-            "No strategies found."
-        )
-
-    # ========================================================
-    # 0.75–1.25 TRADES/WEEK
-    # ========================================================
-
-    exact_frequency = (
-        results_df[
-            (
-                results_df[
-                    "trades_per_week"
-                ] >= 0.75
-            )
-            &
-            (
-                results_df[
-                    "trades_per_week"
-                ] <= 1.25
-            )
-            &
-            (
-                results_df[
-                    "trades"
-                ] >= 50
-            )
-        ]
-        .sort_values(
-            [
-                "win_rate",
-                "total_r"
-            ],
-            ascending=False
-        )
-        .head(20)
+    print(
+        "Total test trades:",
+        total_test_trades
     )
+
+    print(
+        "Wins:",
+        total_test_wins
+    )
+
+    print(
+        "Losses:",
+        total_test_losses
+    )
+
+    print(
+        "Combined win rate:",
+        f"{combined_win_rate:.2f}%"
+    )
+
+    print(
+        "Combined total R:",
+        f"{total_test_r:.2f}"
+    )
+
+    print(
+        "Approx profit factor:",
+        f"{combined_pf:.2f}"
+    )
+
+    # ========================================================
+    # VERDICT
+    # ========================================================
 
     print()
     print("=" * 60)
-    print(
-        "BEST WIN RATE — 0.75 TO 1.25 "
-        "TRADES/WEEK"
-    )
+    print("ROBUSTNESS VERDICT")
     print("=" * 60)
 
-    if len(exact_frequency):
-
-        print(
-            exact_frequency[
-                columns
-            ].to_string(
-                index=False
-            )
-        )
-
-    else:
-
-        print(
-            "No strategies found."
-        )
-
-    # ========================================================
-    # BEST PROFIT
-    # ========================================================
-
-    best_profit = (
-        results_df[
-            results_df["trades"] >= 50
-        ]
-        .sort_values(
-            "total_r",
-            ascending=False
-        )
-        .head(10)
+    profitable_periods = int(
+        (
+            results_df[
+                "test_total_r"
+            ] > 0
+        ).sum()
     )
 
-    print()
-    print("=" * 60)
-    print("BEST PROFIT — MIN 50 TRADES")
-    print("=" * 60)
+    positive_win_periods = int(
+        (
+            results_df[
+                "test_win_rate"
+            ] >= 50
+        ).sum()
+    )
 
     print(
-        best_profit[
-            columns
-        ].to_string(
-            index=False
-        )
+        "Profitable test periods:",
+        f"{profitable_periods}/"
+        f"{len(results_df)}"
     )
-
-    # ========================================================
-    # BEST PROFIT FACTOR
-    # ========================================================
-
-    best_pf = (
-        results_df[
-            results_df["trades"] >= 50
-        ]
-        .sort_values(
-            [
-                "profit_factor",
-                "win_rate"
-            ],
-            ascending=False
-        )
-        .head(10)
-    )
-
-    print()
-    print("=" * 60)
-    print("BEST PROFIT FACTOR — MIN 50 TRADES")
-    print("=" * 60)
 
     print(
-        best_pf[
-            columns
-        ].to_string(
-            index=False
-        )
+        "Test periods >=50% win rate:",
+        f"{positive_win_periods}/"
+        f"{len(results_df)}"
     )
 
-    # ========================================================
-    # FINAL RECOMMENDATION
-    # ========================================================
-
-    ranked = results_df[
-        results_df[
-            "optimizer_score"
-        ] > -999000
-    ]
-
-    if len(ranked):
-
-        best = ranked.iloc[0]
+    if (
+        combined_win_rate >= 70
+        and
+        total_test_r > 0
+        and
+        profitable_periods
+        == len(results_df)
+    ):
 
         print()
-        print("=" * 60)
-        print("OPTIMIZER V2 RECOMMENDATION")
-        print("=" * 60)
-
         print(
-            "Win rate:",
-            f"{best['win_rate']:.2f}%"
+            "VERDICT: STRONG"
         )
 
         print(
-            "Trades:",
-            int(best["trades"])
+            "The strategy has passed a"
+            " preliminary walk-forward test."
         )
 
-        print(
-            "Trades/week:",
-            f"{best['trades_per_week']:.2f}"
-        )
-
-        print(
-            "Total R:",
-            f"{best['total_r']:.2f}"
-        )
-
-        print(
-            "Profit factor:",
-            f"{best['profit_factor']:.2f}"
-        )
-
-        print(
-            "Max drawdown:",
-            f"{best['max_drawdown']:.2f}R"
-        )
-
-        print(
-            "Longest losing streak:",
-            int(
-                best[
-                    "longest_loss_streak"
-                ]
-            )
-        )
+    elif (
+        combined_win_rate >= 60
+        and
+        total_test_r > 0
+    ):
 
         print()
-        print("PARAMETERS")
         print(
-            "RR:",
-            best["rr"]
+            "VERDICT: PROMISING"
         )
 
         print(
-            "Wick:",
-            best["wick"]
+            "The strategy shows an edge,"
+            " but needs further refinement."
+        )
+
+    else:
+
+        print()
+        print(
+            "VERDICT: NOT ROBUST YET"
         )
 
         print(
-            "Body:",
-            best["body"]
-        )
-
-        print(
-            "EMA separation:",
-            best["separation"]
-        )
-
-        print(
-            "Max cross:",
-            best["max_cross"]
-        )
-
-        print(
-            "Hours:",
-            best["hours"]
+            "Do not implement this version live."
         )
 
     print()
-    print("=" * 60)
-    print("FULL RESULTS")
-    print("=" * 60)
-
     print(
+        "Results saved to:",
         OUTPUT_FILE
     )
 
     print()
     print("=" * 60)
-    print("OPTIMIZER V2 COMPLETE")
+    print("OPTIMIZER V3 COMPLETE")
     print("=" * 60)
 
 
