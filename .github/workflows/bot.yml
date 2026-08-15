@@ -24,6 +24,7 @@ jobs:
       - name: Download Dukascopy data
         run: |
           python dukascopy_data.py
+          python eurusd_data.py
 
       - name: Run optimizer
         run: |
