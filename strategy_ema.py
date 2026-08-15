@@ -13,8 +13,10 @@ MIN_EMA_SEPARATION = 0.0008
 SWING_LOOKBACK = 8
 
 ALLOWED_HOURS = {
-    2,
+      2,
     3,
+    4,
+    5,
 }
 
 MIN_UPPER_WICK_RATIO = 0.40
