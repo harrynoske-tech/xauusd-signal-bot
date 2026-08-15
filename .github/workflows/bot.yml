@@ -1,10 +1,10 @@
-name: XAUUSD Strategy Backtest
+name: XAUUSD Strategy Optimizer
 
 on:
   workflow_dispatch:
 
 jobs:
-  run-backtest:
+  run-optimizer:
     runs-on: ubuntu-latest
     timeout-minutes: 350
 
@@ -25,10 +25,12 @@ jobs:
         run: |
           python dukascopy_data.py
 
-      - name: Run backtest
+      - name: Run optimizer
         run: |
-          python backtest.py
+          python optimizer.py
 
-      - name: Run V8 analysis
-        run: |
-          python analyze_v8.py
+      - name: Upload optimizer results
+        uses: actions/upload-artifact@v4
+        with:
+          name: optimizer-results
+          path: data/optimizer_results.csv
