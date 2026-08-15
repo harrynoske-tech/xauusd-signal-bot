@@ -2,7 +2,7 @@ import os
 import numpy as np
 import pandas as pd
 
-from strategy_v8 import generate_signal
+from strategy_ema import generate_signal
 
 
 # ============================================================
