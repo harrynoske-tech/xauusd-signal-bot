@@ -4,41 +4,59 @@
 # ============================================================
 
 import os
+from datetime import datetime
+
 import pandas as pd
-from dukascopy_python import fetch
+import dukascopy_python
+
+from dukascopy_python.instruments import (
+    INSTRUMENT_FX_MAJORS_EUR_USD,
+)
 
 
 # ============================================================
 # SETTINGS
 # ============================================================
 
-SYMBOL = "EURUSD"
+START_DATE = datetime(
+    2020,
+    1,
+    1
+)
 
-TIMEFRAME = "15m"
+END_DATE = datetime(
+    2026,
+    8,
+    15
+)
 
-START_DATE = "2020-01-01"
-
-END_DATE = "2026-08-14"
-
-OUTPUT_FILE = "data/EURUSD_15m.csv"
+OUTPUT_FILE = (
+    "data/EURUSD_15m.csv"
+)
 
 
 # ============================================================
-# DOWNLOAD
+# MAIN
 # ============================================================
 
 def main():
 
     print("=" * 60)
-    print("EURUSD 15M DATA DOWNLOADER")
+    print("DUKASCOPY EURUSD DATA DOWNLOADER")
     print("=" * 60)
 
     print()
-    print("SOURCE: DUKASCOPY")
-    print("SYMBOL:", SYMBOL)
-    print("TIMEFRAME:", TIMEFRAME)
-    print("START:", START_DATE)
-    print("END:", END_DATE)
+    print("DATA SOURCE: DUKASCOPY")
+    print("SYMBOL: EURUSD")
+    print("INSTRUMENT: EUR/USD")
+    print(
+        "START:",
+        START_DATE
+    )
+    print(
+        "END:",
+        END_DATE
+    )
 
     os.makedirs(
         "data",
@@ -46,14 +64,45 @@ def main():
     )
 
     print()
-    print("Downloading EURUSD data...")
-    print("This may take several minutes.")
+    print("=" * 60)
+    print("DOWNLOADING: EURUSD_15m.csv")
+    print("=" * 60)
+
+    print(
+        "Instrument: EUR/USD"
+    )
+
+    print(
+        "Start:",
+        START_DATE
+    )
+
+    print(
+        "End:",
+        END_DATE
+    )
+
+    print(
+        "Interval: 15MIN"
+    )
+
+    print()
+    print(
+        "Requesting Dukascopy data..."
+    )
 
     try:
 
-        df = fetch(
-            SYMBOL,
-            timeframe=TIMEFRAME,
+        df = dukascopy_python.fetch(
+            instrument=(
+                INSTRUMENT_FX_MAJORS_EUR_USD
+            ),
+            interval=(
+                dukascopy_python.INTERVAL_MIN_15
+            ),
+            offer_side=(
+                dukascopy_python.OFFER_SIDE_BID
+            ),
             start=START_DATE,
             end=END_DATE,
         )
@@ -71,24 +120,32 @@ def main():
         )
 
     # ========================================================
-    # NORMALISE COLUMNS
+    # NORMALISE INDEX
     # ========================================================
 
-    df.columns = [
-        str(column).strip()
-        for column in df.columns
-    ]
+    if isinstance(
+        df.index,
+        pd.DatetimeIndex
+    ):
+
+        df = df.reset_index()
+
+    # ========================================================
+    # NORMALISE COLUMN NAMES
+    # ========================================================
 
     rename = {}
 
     for column in df.columns:
 
-        lower = column.lower()
+        lower = str(
+            column
+        ).lower()
 
         if lower in [
-            "date",
-            "datetime",
             "timestamp",
+            "datetime",
+            "date",
             "time",
         ]:
 
@@ -119,34 +176,15 @@ def main():
     )
 
     # ========================================================
-    # HANDLE DATETIME INDEX
+    # VERIFY TIME
     # ========================================================
 
     if "time" not in df.columns:
 
-        if isinstance(
-            df.index,
-            pd.DatetimeIndex
-        ):
-
-            df = df.reset_index()
-
-            df = df.rename(
-                columns={
-                    df.columns[0]:
-                    "time"
-                }
-            )
-
-        else:
-
-            raise RuntimeError(
-                "Could not find EURUSD time column."
-            )
-
-    # ========================================================
-    # DATETIME
-    # ========================================================
+        raise RuntimeError(
+            "Could not find timestamp column "
+            "in EURUSD data."
+        )
 
     df["time"] = pd.to_datetime(
         df["time"],
@@ -154,7 +192,7 @@ def main():
     )
 
     # ========================================================
-    # REQUIRED COLUMNS
+    # VERIFY OHLC
     # ========================================================
 
     required = [
@@ -170,21 +208,29 @@ def main():
         if column not in df.columns:
 
             raise RuntimeError(
-                f"Missing required column: {column}"
+                f"Missing required column: "
+                f"{column}"
             )
+
+    # ========================================================
+    # SELECT COLUMNS
+    # ========================================================
+
+    columns = required
+
+    if "Volume" in df.columns:
+
+        columns.append(
+            "Volume"
+        )
+
+    df = df[
+        columns
+    ]
 
     # ========================================================
     # CLEAN
     # ========================================================
-
-    df = df[
-        required
-        + (
-            ["Volume"]
-            if "Volume" in df.columns
-            else []
-        )
-    ]
 
     df = df.dropna()
 
@@ -206,7 +252,7 @@ def main():
     )
 
     # ========================================================
-    # VERIFY
+    # OUTPUT
     # ========================================================
 
     print()
@@ -215,35 +261,42 @@ def main():
     print("=" * 60)
 
     print(
-        "Candles:",
+        "15M CANDLES:",
         len(df)
     )
 
     print(
-        "Range:",
+        "15M:",
         df["time"].min(),
         "->",
         df["time"].max()
     )
 
+    print()
     print(
-        "File:",
-        OUTPUT_FILE
+        "File created:"
     )
 
-    print("=" * 60)
+    print(
+        f"  {OUTPUT_FILE}"
+    )
 
     # ========================================================
-    # BASIC DATA QUALITY CHECK
+    # DATA QUALITY
     # ========================================================
 
     print()
+    print("=" * 60)
     print("DATA QUALITY")
-    print("-" * 60)
+    print("=" * 60)
 
     print(
         "Missing values:",
-        int(df.isna().sum().sum())
+        int(
+            df.isna()
+            .sum()
+            .sum()
+        )
     )
 
     print(
@@ -262,7 +315,9 @@ def main():
 
     print()
     print("=" * 60)
-    print("EURUSD READY FOR BACKTESTING")
+    print(
+        "EURUSD READY FOR BACKTESTING"
+    )
     print("=" * 60)
 
 
