@@ -5,30 +5,36 @@ import pandas as pd
 
 
 # ============================================================
-# MULTI-MARKET SIGNAL QUALITY OPTIMIZER V8
+# MULTI-MARKET STRATEGY OPTIMIZER V9
 # ============================================================
 #
-# ADAPTIVE SIGNAL SCORING
+# MULTI-SIGNAL ENSEMBLE
 #
-# V8 fixes the main V7 problem:
-# V7's score thresholds were not actually separating trades.
+# V8 proved that adaptive scoring can separate setups during
+# training, but the OOS sample was too small.
 #
-# V8:
-# - Builds individual setup outcomes during training
-# - Learns feature -> win/loss relationships from TRAINING ONLY
-# - Uses quantile bins instead of crude yes/no points
-# - Gives every setup a continuous adaptive score
-# - Tests score buckets
-# - Tests multiple score thresholds
-# - Walk-forward validates on completely unseen data
-# - XAUUSD + EURUSD
-# - No live trading
+# V9 therefore tests several independently defined signal
+# families and combines only signals that demonstrate an edge
+# during TRAINING.
+#
+# SIGNALS
+# -------
+# 1. TREND PULLBACK
+# 2. TREND MOMENTUM
+# 3. VOLATILITY EXPANSION
+# 4. REJECTION / REVERSAL
+# 5. EMA STRUCTURE
+#
+# IMPORTANT:
+# - No OOS data is used for optimisation.
+# - No live trading.
+# - Every OOS result is genuinely unseen by the optimiser.
 #
 # TARGET:
 # ~82% win rate
 # 200+ genuinely OOS trades
 # Positive R
-# Robust across periods/markets
+# Robust across XAUUSD + EURUSD
 # ============================================================
 
 
@@ -63,9 +69,9 @@ PERIODS = [
 ]
 
 
-# ------------------------------------------------------------
-# Base strategy search
-# ------------------------------------------------------------
+# ============================================================
+# SEARCH SPACE
+# ============================================================
 
 RR_VALUES = [
     0.50,
@@ -111,26 +117,11 @@ HOUR_SETS = [
 ]
 
 
-MIN_TRAIN_TRADES = 30
-MIN_RECENT_TRADES = 8
+MIN_TRAIN_TRADES = 25
+MIN_SIGNAL_TRADES = 12
 MIN_OOS_TRADES = 5
 
 RECENT_DAYS = 365
-
-# V8 scoring parameters
-N_BINS = 5
-
-# We test these after the adaptive score is learned.
-SCORE_THRESHOLDS = [
-    -1.5,
-    -1.0,
-    -0.5,
-    0.0,
-    0.5,
-    1.0,
-    1.5,
-    2.0,
-]
 
 
 # ============================================================
@@ -174,7 +165,7 @@ def get_bounds(index, start, end):
 
 
 # ============================================================
-# LOAD DATA
+# DATA
 # ============================================================
 
 def load_data(path):
@@ -299,69 +290,23 @@ def prepare_indicators(df):
 
     index = df.index
 
-    ema20 = (
-        pd.Series(c)
-        .ewm(
-            span=20,
-            adjust=False,
+    def ema(period):
+
+        return (
+            pd.Series(c)
+            .ewm(
+                span=period,
+                adjust=False,
+            )
+            .mean()
+            .to_numpy()
         )
-        .mean()
-        .to_numpy()
-    )
 
-    ema50 = (
-        pd.Series(c)
-        .ewm(
-            span=50,
-            adjust=False,
-        )
-        .mean()
-        .to_numpy()
-    )
-
-    ema100 = (
-        pd.Series(c)
-        .ewm(
-            span=100,
-            adjust=False,
-        )
-        .mean()
-        .to_numpy()
-    )
-
-    ema200 = (
-        pd.Series(c)
-        .ewm(
-            span=200,
-            adjust=False,
-        )
-        .mean()
-        .to_numpy()
-    )
-
-    ema20_slope = (
-        ema20 - np.roll(ema20, 4)
-    ) / np.where(
-        ema20 == 0,
-        1,
-        ema20,
-    )
-
-    ema50_slope = (
-        ema50 - np.roll(ema50, 4)
-    ) / np.where(
-        ema50 == 0,
-        1,
-        ema50,
-    )
-
-    ema100_slope = (
-        ema100 - np.roll(ema100, 8)
-    ) / np.where(
-        ema100 == 0,
-        1,
-        ema100,
-    )
+    ema9 = ema(9)
+    ema20 = ema(20)
+    ema50 = ema(50)
+    ema100 = ema(100)
+    ema200 = ema(200)
 
     candle_range = h - l
 
@@ -416,7 +361,17 @@ def prepare_indicators(df):
         .to_numpy()
     )
 
-    atr_average = (
+    atr50 = (
+        pd.Series(atr)
+        .rolling(
+            50,
+            min_periods=20,
+        )
+        .mean()
+        .to_numpy()
+    )
+
+    atr100 = (
         pd.Series(atr)
         .rolling(
             100,
@@ -428,68 +383,118 @@ def prepare_indicators(df):
 
     atr_ratio = np.divide(
         atr,
-        atr_average,
+        atr100,
         out=np.ones_like(c),
-        where=atr_average > 0,
+        where=atr100 > 0,
     )
 
-    momentum_4 = (
-        c - np.roll(c, 4)
-    ) / np.where(
-        np.roll(c, 4) == 0,
-        1,
-        np.roll(c, 4),
+    atr_acceleration = np.divide(
+        atr - atr50,
+        atr50,
+        out=np.zeros_like(c),
+        where=atr50 > 0,
     )
 
-    momentum_8 = (
-        c - np.roll(c, 8)
-    ) / np.where(
-        np.roll(c, 8) == 0,
-        1,
-        np.roll(c, 8),
+    ema20_slope = np.divide(
+        ema20 - np.roll(ema20, 4),
+        np.where(
+            ema20 == 0,
+            1,
+            ema20,
+        ),
     )
 
-    momentum_16 = (
-        c - np.roll(c, 16)
-    ) / np.where(
-        np.roll(c, 16) == 0,
-        1,
-        np.roll(c, 16),
+    ema50_slope = np.divide(
+        ema50 - np.roll(ema50, 8),
+        np.where(
+            ema50 == 0,
+            1,
+            ema50,
+        ),
     )
 
-    distance_20 = (
-        c - ema20
-    ) / np.where(
-        c == 0,
-        1,
-        c,
+    ema100_slope = np.divide(
+        ema100 - np.roll(ema100, 12),
+        np.where(
+            ema100 == 0,
+            1,
+            ema100,
+        ),
     )
 
-    distance_50 = (
-        c - ema50
-    ) / np.where(
-        c == 0,
-        1,
-        c,
+    ema200_slope = np.divide(
+        ema200 - np.roll(ema200, 16),
+        np.where(
+            ema200 == 0,
+            1,
+            ema200,
+        ),
     )
 
-    separation = (
-        np.abs(ema20 - ema50)
-    ) / np.where(
-        c == 0,
-        1,
-        c,
+    momentum4 = np.divide(
+        c - np.roll(c, 4),
+        np.where(
+            np.roll(c, 4) == 0,
+            1,
+            np.roll(c, 4),
+        ),
     )
 
-    separation_50_100 = (
-        np.abs(ema50 - ema100)
-    ) / np.where(
-        c == 0,
-        1,
-        c,
+    momentum8 = np.divide(
+        c - np.roll(c, 8),
+        np.where(
+            np.roll(c, 8) == 0,
+            1,
+            np.roll(c, 8),
+        ),
     )
 
-    recent_high_8 = (
+    momentum16 = np.divide(
+        c - np.roll(c, 16),
+        np.where(
+            np.roll(c, 16) == 0,
+            1,
+            np.roll(c, 16),
+        ),
+    )
+
+    separation20_50 = np.divide(
+        np.abs(ema20 - ema50),
+        np.where(
+            c == 0,
+            1,
+            c,
+        ),
+    )
+
+    separation50_100 = np.divide(
+        np.abs(ema50 - ema100),
+        np.where(
+            c == 0,
+            1,
+            c,
+        ),
+    )
+
+    distance20 = np.divide(
+        c - ema20,
+        np.where(
+            c == 0,
+            1,
+            c,
+        ),
+    )
+
+    distance50 = np.divide(
+        c - ema50,
+        np.where(
+            c == 0,
+            1,
+            c,
+        ),
+    )
+
+    high8 = (
         pd.Series(h)
         .rolling(
             8,
@@ -499,7 +504,7 @@ def prepare_indicators(df):
         .to_numpy()
     )
 
-    recent_low_8 = (
+    low8 = (
         pd.Series(l)
         .rolling(
             8,
@@ -509,23 +514,57 @@ def prepare_indicators(df):
         .to_numpy()
     )
 
-    distance_recent_high = (
-        recent_high_8 - c
-    ) / np.where(
-        c == 0,
-        1,
-        c,
+    high20 = (
+        pd.Series(h)
+        .rolling(
+            20,
+            min_periods=1,
+        )
+        .max()
+        .to_numpy()
     )
 
-    distance_recent_low = (
-        c - recent_low_8
-    ) / np.where(
-        c == 0,
-        1,
-        c,
+    low20 = (
+        pd.Series(l)
+        .rolling(
+            20,
+            min_periods=1,
+        )
+        .min()
+        .to_numpy()
     )
 
-    cross_age = np.full(
+    close_location = np.divide(
+        c - l,
+        candle_range,
+        out=np.full_like(
+            c,
+            0.5,
+        ),
+        where=candle_range > 0,
+    )
+
+    range_expansion = np.divide(
+        candle_range,
+        atr,
+        out=np.ones_like(c),
+        where=atr > 0,
+    )
+
+    prior_range = np.roll(
+        candle_range,
+        1,
+    )
+
+    range_change = np.divide(
+        candle_range,
+        prior_range,
+        out=np.ones_like(c),
+        where=prior_range > 0,
+    )
+
+    # Age since EMA20/EMA50 relationship changed.
+    trend_cross_age = np.full(
         len(c),
         9999,
         dtype=np.int32,
@@ -538,26 +577,33 @@ def prepare_indicators(df):
         len(c),
     ):
 
-        crossed = (
+        previous_state = (
             ema20[i - 1]
             >= ema50[i - 1]
-            and
-            ema20[i]
-            < ema50[i]
         )
 
-        if crossed:
+        current_state = (
+            ema20[i]
+            >= ema50[i]
+        )
+
+        if previous_state != current_state:
             last_cross = i
 
         if last_cross >= 0:
-            cross_age[i] = (
+            trend_cross_age[i] = (
                 i - last_cross
             )
 
-    bearish = c < o
-    bullish = c > o
+    bearish = (
+        c < o
+    )
 
-    bearish_count_3 = (
+    bullish = (
+        c > o
+    )
+
+    bearish3 = (
         pd.Series(
             bearish.astype(int)
         )
@@ -569,7 +615,7 @@ def prepare_indicators(df):
         .to_numpy()
     )
 
-    bearish_count_5 = (
+    bearish5 = (
         pd.Series(
             bearish.astype(int)
         )
@@ -581,7 +627,7 @@ def prepare_indicators(df):
         .to_numpy()
     )
 
-    bullish_count_3 = (
+    bullish3 = (
         pd.Series(
             bullish.astype(int)
         )
@@ -593,16 +639,16 @@ def prepare_indicators(df):
         .to_numpy()
     )
 
-    atr_previous = np.roll(
-        atr,
-        20,
-    )
-
-    volatility_change = np.divide(
-        atr - atr_previous,
-        atr_previous,
-        out=np.zeros_like(c),
-        where=atr_previous != 0,
+    bullish5 = (
+        pd.Series(
+            bullish.astype(int)
+        )
+        .rolling(
+            5,
+            min_periods=1,
+        )
+        .sum()
+        .to_numpy()
     )
 
     hours = index.hour.to_numpy()
@@ -613,139 +659,106 @@ def prepare_indicators(df):
         "low": l,
         "close": c,
 
+        "ema9": ema9,
         "ema20": ema20,
         "ema50": ema50,
         "ema100": ema100,
         "ema200": ema200,
 
-        "ema20_slope": ema20_slope,
-        "ema50_slope": ema50_slope,
-        "ema100_slope": ema100_slope,
+        "ema20_slope":
+            ema20_slope,
 
-        "body_ratio": body_ratio,
-        "upper_wick_ratio": upper_wick_ratio,
-        "lower_wick_ratio": lower_wick_ratio,
+        "ema50_slope":
+            ema50_slope,
 
-        "atr": atr,
-        "atr_ratio": atr_ratio,
+        "ema100_slope":
+            ema100_slope,
 
-        "momentum_4": momentum_4,
-        "momentum_8": momentum_8,
-        "momentum_16": momentum_16,
+        "ema200_slope":
+            ema200_slope,
 
-        "distance_20": distance_20,
-        "distance_50": distance_50,
+        "body_ratio":
+            body_ratio,
 
-        "separation": separation,
-        "separation_50_100":
-            separation_50_100,
+        "upper_wick_ratio":
+            upper_wick_ratio,
 
-        "distance_recent_high":
-            distance_recent_high,
+        "lower_wick_ratio":
+            lower_wick_ratio,
 
-        "distance_recent_low":
-            distance_recent_low,
+        "atr":
+            atr,
 
-        "cross_age": cross_age,
+        "atr_ratio":
+            atr_ratio,
 
-        "bearish_count_3":
-            bearish_count_3,
+        "atr_acceleration":
+            atr_acceleration,
 
-        "bearish_count_5":
-            bearish_count_5,
+        "momentum4":
+            momentum4,
 
-        "bullish_count_3":
-            bullish_count_3,
+        "momentum8":
+            momentum8,
 
-        "volatility_change":
-            volatility_change,
+        "momentum16":
+            momentum16,
 
-        "hours": hours,
+        "separation20_50":
+            separation20_50,
+
+        "separation50_100":
+            separation50_100,
+
+        "distance20":
+            distance20,
+
+        "distance50":
+            distance50,
+
+        "high8":
+            high8,
+
+        "low8":
+            low8,
+
+        "high20":
+            high20,
+
+        "low20":
+            low20,
+
+        "close_location":
+            close_location,
+
+        "range_expansion":
+            range_expansion,
+
+        "range_change":
+            range_change,
+
+        "trend_cross_age":
+            trend_cross_age,
+
+        "bearish3":
+            bearish3,
+
+        "bearish5":
+            bearish5,
+
+        "bullish3":
+            bullish3,
+
+        "bullish5":
+            bullish5,
+
+        "hours":
+            hours,
     }
 
 
 # ============================================================
-# BASE SETUPS
-# ============================================================
-
-def generate_setups(d, params):
-
-    (
-        rr,
-        wick,
-        body,
-        separation,
-        max_cross,
-        hours,
-    ) = params
-
-    mask = (
-        np.isin(
-            d["hours"],
-            hours,
-        )
-
-        & (
-            d["ema20"]
-            < d["ema50"]
-        )
-
-        & (
-            d["ema50"]
-            < d["ema100"]
-        )
-
-        & (
-            d["ema100"]
-            < d["ema200"]
-        )
-
-        & (
-            d["ema20_slope"]
-            < 0
-        )
-
-        & (
-            d["ema50_slope"]
-            < 0
-        )
-
-        & (
-            d["separation"]
-            >= separation
-        )
-
-        & (
-            d["cross_age"]
-            <= max_cross
-        )
-
-        & (
-            d["close"]
-            < d["open"]
-        )
-
-        & (
-            d["upper_wick_ratio"]
-            >= wick
-        )
-
-        & (
-            d["body_ratio"]
-            >= body
-        )
-
-        & (
-            d["close"]
-            < d["ema20"]
-        )
-    )
-
-    return np.flatnonzero(mask)
-
-
-# ============================================================
-# SINGLE TRADE OUTCOME
+# TRADE ENGINE
 # ============================================================
 
 def single_trade(
@@ -801,369 +814,7 @@ def single_trade(
     return None
 
 
-# ============================================================
-# GENERATE INDIVIDUAL TRAINING TRADES
-# ============================================================
-
-def build_training_examples(
-    d,
-    timestamps,
-    setups,
-    rr,
-    start,
-    end,
-):
-
-    bounds = get_bounds(
-        timestamps,
-        start,
-        end,
-    )
-
-    if bounds is None:
-        return []
-
-    start_idx, end_idx = bounds
-
-    selected = setups[
-        (setups >= start_idx)
-        & (setups <= end_idx)
-    ]
-
-    examples = []
-
-    next_available = start_idx
-
-    for index in selected:
-
-        if index < next_available:
-            continue
-
-        result = single_trade(
-            d,
-            index,
-            rr,
-            end_idx,
-        )
-
-        if result is None:
-            continue
-
-        r_value, exit_index = result
-
-        examples.append(
-            {
-                "index": int(index),
-                "r": float(r_value),
-                "win": int(r_value > 0),
-            }
-        )
-
-        next_available = (
-            exit_index + 1
-        )
-
-    return examples
-
-
-# ============================================================
-# FEATURE LIST
-# ============================================================
-
-FEATURES = [
-    "cross_age",
-    "bearish_count_5",
-    "bearish_count_3",
-    "atr_ratio",
-    "volatility_change",
-    "body_ratio",
-    "lower_wick_ratio",
-    "upper_wick_ratio",
-    "momentum_4",
-    "momentum_8",
-    "momentum_16",
-    "distance_20",
-    "distance_50",
-    "separation",
-    "separation_50_100",
-    "distance_recent_high",
-    "distance_recent_low",
-    "ema20_slope",
-    "ema50_slope",
-]
-
-
-# ============================================================
-# ADAPTIVE FEATURE MODEL
-# ============================================================
-#
-# For every feature:
-#
-# 1. Split TRAINING examples into quantile bins.
-# 2. Calculate smoothed win rate in each bin.
-# 3. Convert win rate into log-odds relative to baseline.
-#
-# This produces a continuous feature contribution.
-#
-# IMPORTANT:
-# This model is learned ONLY from training data.
-# ============================================================
-
-def build_feature_model(
-    d,
-    examples,
-):
-
-    if len(examples) < 30:
-        return None
-
-    indices = np.array(
-        [
-            x["index"]
-            for x in examples
-        ],
-        dtype=int,
-    )
-
-    outcomes = np.array(
-        [
-            x["win"]
-            for x in examples
-        ],
-        dtype=float,
-    )
-
-    baseline = (
-        outcomes.sum()
-        + 2.0
-    ) / (
-        len(outcomes)
-        + 4.0
-    )
-
-    baseline = np.clip(
-        baseline,
-        0.05,
-        0.95,
-    )
-
-    baseline_logit = np.log(
-        baseline
-        / (1.0 - baseline)
-    )
-
-    model = {}
-
-    for feature in FEATURES:
-
-        values = np.asarray(
-            d[feature][indices],
-            dtype=float,
-        )
-
-        finite = np.isfinite(values)
-
-        values = values[finite]
-        local_outcomes = outcomes[
-            finite
-        ]
-
-        if len(values) < 20:
-            continue
-
-        unique = np.unique(values)
-
-        if len(unique) < 3:
-            continue
-
-        try:
-
-            edges = np.quantile(
-                values,
-                np.linspace(
-                    0,
-                    1,
-                    N_BINS + 1,
-                ),
-            )
-
-        except Exception:
-            continue
-
-        edges = np.unique(edges)
-
-        if len(edges) < 3:
-            continue
-
-        bin_values = np.digitize(
-            values,
-            edges[1:-1],
-            right=False,
-        )
-
-        bin_models = {}
-
-        for bin_id in range(
-            len(edges) - 1
-        ):
-
-            mask = (
-                bin_values
-                == bin_id
-            )
-
-            count = int(
-                mask.sum()
-            )
-
-            if count < 5:
-                continue
-
-            wins = float(
-                local_outcomes[
-                    mask
-                ].sum()
-            )
-
-            # Laplace smoothing.
-            win_rate = (
-                wins + 2.0
-            ) / (
-                count + 4.0
-            )
-
-            win_rate = np.clip(
-                win_rate,
-                0.05,
-                0.95,
-            )
-
-            logit = np.log(
-                win_rate
-                / (1.0 - win_rate)
-            )
-
-            contribution = (
-                logit
-                - baseline_logit
-            )
-
-            # Prevent one feature from
-            # dominating the entire model.
-            contribution = np.clip(
-                contribution,
-                -1.25,
-                1.25,
-            )
-
-            bin_models[
-                bin_id
-            ] = {
-                "count": count,
-                "win_rate": win_rate,
-                "contribution":
-                    contribution,
-            }
-
-        if bin_models:
-
-            model[
-                feature
-            ] = {
-                "edges": edges,
-                "bins": bin_models,
-            }
-
-    if not model:
-        return None
-
-    return {
-        "baseline": baseline,
-        "baseline_logit":
-            baseline_logit,
-        "features": model,
-    }
-
-
-# ============================================================
-# SCORE INDIVIDUAL SETUPS
-# ============================================================
-
-def score_setups(
-    d,
-    indices,
-    model,
-):
-
-    scores = np.zeros(
-        len(indices),
-        dtype=float,
-    )
-
-    if model is None:
-        return scores
-
-    for position, index in enumerate(
-        indices
-    ):
-
-        score = 0.0
-        used = 0
-
-        for feature, config in (
-            model["features"].items()
-        ):
-
-            value = d[
-                feature
-            ][index]
-
-            if not np.isfinite(value):
-                continue
-
-            edges = config[
-                "edges"
-            ]
-
-            bins = config[
-                "bins"
-            ]
-
-            bin_id = int(
-                np.digitize(
-                    value,
-                    edges[1:-1],
-                    right=False,
-                )
-            )
-
-            if bin_id not in bins:
-                continue
-
-            contribution = bins[
-                bin_id
-            ]["contribution"]
-
-            score += contribution
-            used += 1
-
-        if used > 0:
-
-            # Normalise for the number of
-            # available features.
-            scores[position] = (
-                score
-                / np.sqrt(used)
-            )
-
-    return scores
-
-
-# ============================================================
-# SIMULATE FILTERED SETUPS
-# ============================================================
-
-def simulate_filtered(
+def simulate(
     d,
     indices,
     rr,
@@ -1173,7 +824,11 @@ def simulate_filtered(
 
     trades = []
 
-    next_available = start_idx
+    exits = []
+
+    next_available = (
+        start_idx
+    )
 
     for index in indices:
 
@@ -1196,24 +851,28 @@ def simulate_filtered(
         if result is None:
             continue
 
-        r_value, exit_index = result
+        r_value, exit_idx = result
 
         trades.append(
             float(r_value)
         )
 
-        next_available = (
-            exit_index + 1
+        exits.append(
+            int(exit_idx)
         )
 
-    return trades
+        next_available = (
+            exit_idx + 1
+        )
+
+    return trades, exits
 
 
 # ============================================================
 # METRICS
 # ============================================================
 
-def calculate_metrics(
+def metrics(
     trades,
     start_time,
     end_time,
@@ -1231,7 +890,6 @@ def calculate_metrics(
     losses = values < 0
 
     count = len(values)
-
     win_count = int(
         wins.sum()
     )
@@ -1261,7 +919,7 @@ def calculate_metrics(
         equity
     )
 
-    drawdown = float(
+    dd = float(
         np.max(
             peak - equity
         )
@@ -1297,18 +955,17 @@ def calculate_metrics(
         (
             end - start
         ).total_seconds()
-        / 86400.0,
+        / 86400,
         1,
     )
 
-    trades_per_week = (
-        count
-        / (days / 7)
-    )
-
     return {
-        "trades": count,
-        "wins": win_count,
+        "trades":
+            count,
+
+        "wins":
+            win_count,
+
         "losses":
             int(losses.sum()),
 
@@ -1324,23 +981,416 @@ def calculate_metrics(
             float(pf),
 
         "drawdown":
-            drawdown,
+            dd,
 
         "longest_losing_streak":
             longest,
 
         "trades_per_week":
-            trades_per_week,
+            count
+            / (days / 7),
     }
 
 
 # ============================================================
-# BASE OPTIMIZER
+# SIGNAL FAMILIES
 # ============================================================
 
-def optimize_base(
+def trend_pullback(
+    d,
+    params,
+):
+
+    (
+        rr,
+        wick,
+        body,
+        separation,
+        max_cross,
+        hours,
+    ) = params
+
+    mask = (
+        np.isin(
+            d["hours"],
+            hours,
+        )
+
+        & (
+            d["ema20"]
+            < d["ema50"]
+        )
+
+        & (
+            d["ema50"]
+            < d["ema100"]
+        )
+
+        & (
+            d["ema100"]
+            < d["ema200"]
+        )
+
+        & (
+            d["ema20_slope"]
+            < 0
+        )
+
+        & (
+            d["ema50_slope"]
+            < 0
+        )
+
+        & (
+            d["separation20_50"]
+            >= separation
+        )
+
+        & (
+            d["trend_cross_age"]
+            <= max_cross
+        )
+
+        & (
+            d["close"]
+            < d["open"]
+        )
+
+        & (
+            d["upper_wick_ratio"]
+            >= wick
+        )
+
+        & (
+            d["body_ratio"]
+            >= body
+        )
+
+        & (
+            d["close"]
+            < d["ema20"]
+        )
+
+        & (
+            d["close"]
+            > d["low8"]
+        )
+    )
+
+    return np.flatnonzero(mask)
+
+
+def trend_momentum(
+    d,
+    params,
+):
+
+    (
+        rr,
+        wick,
+        body,
+        separation,
+        max_cross,
+        hours,
+    ) = params
+
+    mask = (
+        np.isin(
+            d["hours"],
+            hours,
+        )
+
+        & (
+            d["ema20"]
+            < d["ema50"]
+        )
+
+        & (
+            d["ema50"]
+            < d["ema100"]
+        )
+
+        & (
+            d["ema50_slope"]
+            < 0
+        )
+
+        & (
+            d["ema100_slope"]
+            < 0
+        )
+
+        & (
+            d["separation20_50"]
+            >= separation
+        )
+
+        & (
+            d["momentum4"]
+            < 0
+        )
+
+        & (
+            d["momentum8"]
+            < 0
+        )
+
+        & (
+            d["momentum16"]
+            < 0
+        )
+
+        & (
+            d["body_ratio"]
+            >= body
+        )
+
+        & (
+            d["range_expansion"]
+            >= 0.8
+        )
+
+        & (
+            d["close"]
+            < d["ema20"]
+        )
+    )
+
+    return np.flatnonzero(mask)
+
+
+def volatility_expansion(
+    d,
+    params,
+):
+
+    (
+        rr,
+        wick,
+        body,
+        separation,
+        max_cross,
+        hours,
+    ) = params
+
+    mask = (
+        np.isin(
+            d["hours"],
+            hours,
+        )
+
+        & (
+            d["ema20"]
+            < d["ema50"]
+        )
+
+        & (
+            d["ema50"]
+            < d["ema100"]
+        )
+
+        & (
+            d["ema50_slope"]
+            < 0
+        )
+
+        & (
+            d["atr_ratio"]
+            >= 1.05
+        )
+
+        & (
+            d["atr_acceleration"]
+            > 0
+        )
+
+        & (
+            d["range_expansion"]
+            >= 1.0
+        )
+
+        & (
+            d["range_change"]
+            >= 1.05
+        )
+
+        & (
+            d["close"]
+            < d["open"]
+        )
+
+        & (
+            d["close"]
+            < d["ema20"]
+        )
+
+        & (
+            d["body_ratio"]
+            >= body
+        )
+    )
+
+    return np.flatnonzero(mask)
+
+
+def rejection_reversal(
+    d,
+    params,
+):
+
+    (
+        rr,
+        wick,
+        body,
+        separation,
+        max_cross,
+        hours,
+    ) = params
+
+    mask = (
+        np.isin(
+            d["hours"],
+            hours,
+        )
+
+        & (
+            d["ema20"]
+            < d["ema50"]
+        )
+
+        & (
+            d["ema50"]
+            < d["ema100"]
+        )
+
+        & (
+            d["lower_wick_ratio"]
+            >= 0.35
+        )
+
+        & (
+            d["close_location"]
+            >= 0.55
+        )
+
+        & (
+            d["body_ratio"]
+            >= body
+        )
+
+        & (
+            d["bearish5"]
+            >= 3
+        )
+
+        & (
+            d["distance50"]
+            < 0
+        )
+    )
+
+    return np.flatnonzero(mask)
+
+
+def ema_structure(
+    d,
+    params,
+):
+
+    (
+        rr,
+        wick,
+        body,
+        separation,
+        max_cross,
+        hours,
+    ) = params
+
+    mask = (
+        np.isin(
+            d["hours"],
+            hours,
+        )
+
+        & (
+            d["ema9"]
+            < d["ema20"]
+        )
+
+        & (
+            d["ema20"]
+            < d["ema50"]
+        )
+
+        & (
+            d["ema50"]
+            < d["ema100"]
+        )
+
+        & (
+            d["ema100"]
+            < d["ema200"]
+        )
+
+        & (
+            d["ema9"]
+            < np.roll(
+                d["ema9"],
+                1,
+            )
+        )
+
+        & (
+            d["ema20_slope"]
+            < 0
+        )
+
+        & (
+            d["ema50_slope"]
+            < 0
+        )
+
+        & (
+            d["distance20"]
+            < 0
+        )
+
+        & (
+            d["body_ratio"]
+            >= body
+        )
+    )
+
+    return np.flatnonzero(mask)
+
+
+SIGNALS = {
+    "TREND_PULLBACK":
+        trend_pullback,
+
+    "TREND_MOMENTUM":
+        trend_momentum,
+
+    "VOLATILITY_EXPANSION":
+        volatility_expansion,
+
+    "REJECTION_REVERSAL":
+        rejection_reversal,
+
+    "EMA_STRUCTURE":
+        ema_structure,
+}
+
+
+# ============================================================
+# SIGNAL OPTIMISATION
+# ============================================================
+
+def optimise_signal(
     d,
     timestamps,
+    signal_name,
+    signal_function,
     train_start,
     train_end,
 ):
@@ -1356,23 +1406,25 @@ def optimize_base(
         )
     )
 
+    best = None
+
+    print()
     print(
-        f"BASE COMBINATIONS: "
-        f"{len(combinations)}"
+        f"{signal_name}: "
+        f"{len(combinations)} "
+        f"combinations"
     )
 
-    candidates = []
-
-    recent_end = utc(
-        train_end
+    bounds = get_bounds(
+        timestamps,
+        train_start,
+        train_end,
     )
 
-    recent_start = (
-        recent_end
-        - pd.Timedelta(
-            days=RECENT_DAYS
-        )
-    )
+    if bounds is None:
+        return None
+
+    start_idx, end_idx = bounds
 
     for number, params in enumerate(
         combinations,
@@ -1381,448 +1433,376 @@ def optimize_base(
 
         if (
             number == 1
-            or number % 250 == 0
+            or number % 1000 == 0
             or number == len(combinations)
         ):
 
             print(
-                f"Base progress: "
+                f"{signal_name} progress: "
                 f"{number}/"
-                f"{len(combinations)} "
-                f"("
-                f"{number / len(combinations) * 100:.1f}%"
-                f")",
+                f"{len(combinations)}",
                 flush=True,
             )
 
-        setups = generate_setups(
+        indices = signal_function(
             d,
             params,
         )
 
-        if len(setups) == 0:
+        if len(indices) < MIN_SIGNAL_TRADES:
             continue
 
-        bounds = get_bounds(
-            timestamps,
-            train_start,
-            train_end,
+        trades, _ = simulate(
+            d,
+            indices,
+            params[0],
+            start_idx,
+            end_idx,
         )
 
-        if bounds is None:
-            continue
-
-        start_idx, end_idx = bounds
-
-        train_trades = (
-            simulate_filtered(
-                d,
-                setups,
-                params[0],
-                start_idx,
-                end_idx,
-            )
-        )
-
-        train = calculate_metrics(
-            train_trades,
+        m = metrics(
+            trades,
             timestamps[start_idx],
             timestamps[end_idx],
         )
 
-        if (
-            train is None
-            or train["trades"]
-            < MIN_TRAIN_TRADES
-        ):
+        if m is None:
             continue
 
-        recent_bounds = get_bounds(
-            timestamps,
-            recent_start,
-            train_end,
-        )
-
-        if recent_bounds is None:
+        if m["trades"] < MIN_SIGNAL_TRADES:
             continue
 
-        recent_start_idx, recent_end_idx = (
-            recent_bounds
-        )
-
-        recent_trades = (
-            simulate_filtered(
-                d,
-                setups,
-                params[0],
-                recent_start_idx,
-                recent_end_idx,
-            )
-        )
-
-        recent = calculate_metrics(
-            recent_trades,
-            timestamps[
-                recent_start_idx
-            ],
-            timestamps[
-                recent_end_idx
-            ],
-        )
-
-        if (
-            recent is None
-            or recent["trades"]
-            < MIN_RECENT_TRADES
-        ):
-            continue
-
+        # We want a genuine edge, not just
+        # a high win rate with tiny sample.
         score = (
-            train["total_r"]
-            + recent["total_r"] * 3
-            + train["win_rate"] * 0.05
-            + recent["win_rate"] * 0.30
+            m["win_rate"]
+            * 1.0
+            + m["total_r"]
+            * 3.0
             + min(
-                recent[
-                    "profit_factor"
-                ],
+                m["profit_factor"],
                 3,
-            ) * 3
-            - recent["drawdown"] * 1.5
+            )
+            * 8.0
+            - m["drawdown"]
+            * 2.0
         )
 
-        candidates.append(
-            {
-                "params": params,
-                "setups": setups,
-                "train": train,
-                "recent": recent,
-                "score": score,
-            }
-        )
+        if m["trades"] < 20:
+            score -= 5
 
-    candidates.sort(
-        key=lambda x: x["score"],
-        reverse=True,
-    )
+        candidate = {
+            "signal":
+                signal_name,
 
-    return candidates[:10]
+            "params":
+                params,
+
+            "indices":
+                indices,
+
+            "metrics":
+                m,
+
+            "score":
+                score,
+        }
+
+        if (
+            best is None
+            or candidate["score"]
+            > best["score"]
+        ):
+
+            best = candidate
+
+    return best
 
 
 # ============================================================
-# ADAPTIVE SCORE TEST
+# ENSEMBLE SELECTION
 # ============================================================
 
-def test_score_model(
+def build_ensemble(
     d,
     timestamps,
-    candidate,
+    signal_candidates,
     train_start,
     train_end,
 ):
 
-    params = candidate[
-        "params"
+    valid = [
+        x
+        for x in signal_candidates
+        if x is not None
     ]
 
-    setups = candidate[
-        "setups"
-    ]
-
-    examples = build_training_examples(
-        d,
-        timestamps,
-        setups,
-        params[0],
-        train_start,
-        train_end,
-    )
-
-    if len(examples) < MIN_TRAIN_TRADES:
+    if not valid:
         return None
-
-    model = build_feature_model(
-        d,
-        examples,
-    )
-
-    if model is None:
-        return None
-
-    train_indices = np.array(
-        [
-            x["index"]
-            for x in examples
-        ],
-        dtype=int,
-    )
-
-    train_scores = score_setups(
-        d,
-        train_indices,
-        model,
-    )
-
-    # --------------------------------------------------------
-    # Score distribution
-    # --------------------------------------------------------
 
     print()
     print(
-        "ADAPTIVE SCORE DISTRIBUTION"
+        "SIGNAL CANDIDATES"
     )
 
     print("-" * 60)
 
-    percentiles = [
-        10,
-        25,
-        50,
-        75,
-        90,
-    ]
+    for candidate in valid:
 
-    for p in percentiles:
+        m = candidate[
+            "metrics"
+        ]
 
         print(
-            f"P{p}: "
-            f"{np.percentile(train_scores, p):.3f}"
+            f"{candidate['signal']:24s} "
+            f"Trades {m['trades']:3d} | "
+            f"WR {m['win_rate']:6.2f}% | "
+            f"R {m['total_r']:7.2f} | "
+            f"PF {m['profit_factor']:5.2f}"
         )
 
     # --------------------------------------------------------
-    # Test score buckets
+    # Only retain signals that show a meaningful training edge.
     # --------------------------------------------------------
 
-    bucket_rows = []
+    strong = []
 
-    score_edges = [
-        -np.inf,
-        -1.5,
-        -0.75,
-        -0.25,
-        0.25,
-        0.75,
-        1.5,
-        np.inf,
-    ]
+    for candidate in valid:
 
-    print()
-    print(
-        "TRAINING SCORE BUCKETS"
-    )
+        m = candidate[
+            "metrics"
+        ]
 
-    print("-" * 60)
+        if (
+            m["trades"] >= MIN_SIGNAL_TRADES
+            and m["win_rate"] >= 55
+            and m["total_r"] > 0
+            and m["profit_factor"] > 1.05
+        ):
 
-    for low, high in zip(
-        score_edges[:-1],
-        score_edges[1:],
+            strong.append(
+                candidate
+            )
+
+    if not strong:
+
+        print()
+        print(
+            "No strong signals."
+        )
+
+        return None
+
+    # --------------------------------------------------------
+    # Test all useful combinations.
+    # --------------------------------------------------------
+
+    best = None
+
+    for count in range(
+        1,
+        min(
+            len(strong),
+            4,
+        ) + 1,
     ):
 
-        mask = (
-            (train_scores >= low)
-            & (train_scores < high)
-        )
+        for combination in itertools.combinations(
+            strong,
+            count,
+        ):
 
-        selected = train_indices[
-            mask
-        ]
-
-        if len(selected) < 5:
-            continue
-
-        wins = sum(
-            examples[
-                list(train_indices).index(
-                    index
+            union = np.unique(
+                np.concatenate(
+                    [
+                        x["indices"]
+                        for x in combination
+                    ]
                 )
-            ]["win"]
-            for index in selected
-        )
-
-        wr = (
-            wins
-            / len(selected)
-            * 100
-        )
-
-        print(
-            f"{low:7.2f} -> "
-            f"{high:7.2f} | "
-            f"trades "
-            f"{len(selected):3d} | "
-            f"WR "
-            f"{wr:6.2f}%"
-        )
-
-        bucket_rows.append(
-            {
-                "low": low,
-                "high": high,
-                "trades": len(selected),
-                "win_rate": wr,
-            }
-        )
-
-    # --------------------------------------------------------
-    # Threshold selection
-    # --------------------------------------------------------
-
-    threshold_results = []
-
-    train_bounds = get_bounds(
-        timestamps,
-        train_start,
-        train_end,
-    )
-
-    if train_bounds is None:
-        return None
-
-    train_start_idx, train_end_idx = (
-        train_bounds
-    )
-
-    for threshold in SCORE_THRESHOLDS:
-
-        mask = (
-            train_scores
-            >= threshold
-        )
-
-        selected = train_indices[
-            mask
-        ]
-
-        if len(selected) < 15:
-            continue
-
-        trades = simulate_filtered(
-            d,
-            selected,
-            params[0],
-            train_start_idx,
-            train_end_idx,
-        )
-
-        result = calculate_metrics(
-            trades,
-            timestamps[
-                train_start_idx
-            ],
-            timestamps[
-                train_end_idx
-            ],
-        )
-
-        if result is None:
-            continue
-
-        if result["trades"] < 15:
-            continue
-
-        # Prefer high WR, positive R and
-        # reasonable sample size.
-        selection_score = (
-            result["win_rate"]
-            * 1.0
-            + result["total_r"]
-            * 4.0
-            + min(
-                result["profit_factor"],
-                3,
             )
-            * 8.0
-            - result["drawdown"]
-            * 2.0
-        )
 
-        # Strong penalty for tiny samples.
-        if result["trades"] < 25:
-            selection_score -= (
-                25
-                - result["trades"]
-            ) * 0.5
+            bounds = get_bounds(
+                timestamps,
+                train_start,
+                train_end,
+            )
 
-        threshold_results.append(
-            {
-                "threshold":
-                    threshold,
+            if bounds is None:
+                continue
+
+            start_idx, end_idx = bounds
+
+            trades, exits = simulate(
+                d,
+                union,
+                combination[0]["params"][0],
+                start_idx,
+                end_idx,
+            )
+
+            m = metrics(
+                trades,
+                timestamps[start_idx],
+                timestamps[end_idx],
+            )
+
+            if m is None:
+                continue
+
+            if m["trades"] < MIN_TRAIN_TRADES:
+                continue
+
+            # Reward high WR, positive R,
+            # PF and sample size.
+            score = (
+                m["win_rate"]
+                * 1.5
+                + m["total_r"]
+                * 3.0
+                + min(
+                    m["profit_factor"],
+                    3,
+                )
+                * 10
+                + np.log1p(
+                    m["trades"]
+                ) * 5
+                - m["drawdown"]
+                * 2
+            )
+
+            # Penalise overly correlated
+            # combinations which only duplicate
+            # the same trades.
+            trade_sets = [
+                set(
+                    x["indices"]
+                    .tolist()
+                )
+                for x in combination
+            ]
+
+            overlap_penalty = 0.0
+
+            for a in range(
+                len(trade_sets)
+            ):
+
+                for b in range(
+                    a + 1,
+                    len(trade_sets)
+                ):
+
+                    union_size = len(
+                        trade_sets[a]
+                        | trade_sets[b]
+                    )
+
+                    intersection = len(
+                        trade_sets[a]
+                        & trade_sets[b]
+                    )
+
+                    if union_size > 0:
+
+                        overlap_penalty += (
+                            intersection
+                            / union_size
+                            * 10
+                        )
+
+            score -= (
+                overlap_penalty
+            )
+
+            ensemble = {
+                "signals":
+                    combination,
+
+                "indices":
+                    union,
+
                 "metrics":
-                    result,
+                    m,
+
                 "score":
-                    selection_score,
+                    score,
             }
-        )
 
-    if not threshold_results:
+            if (
+                best is None
+                or score
+                > best["score"]
+            ):
+
+                best = ensemble
+
+    if best is None:
         return None
-
-    threshold_results.sort(
-        key=lambda x: x["score"],
-        reverse=True,
-    )
 
     print()
     print(
-        "ADAPTIVE SCORE THRESHOLDS"
+        "SELECTED TRAINING ENSEMBLE"
     )
 
     print("-" * 60)
 
-    for row in threshold_results:
+    print(
+        "Signals:"
+    )
 
-        m = row["metrics"]
+    for signal in best[
+        "signals"
+    ]:
 
         print(
-            f"Threshold "
-            f"{row['threshold']:6.2f} | "
-            f"Trades "
-            f"{m['trades']:3d} | "
-            f"WR "
-            f"{m['win_rate']:6.2f}% | "
-            f"R "
-            f"{m['total_r']:7.2f} | "
-            f"PF "
-            f"{m['profit_factor']:5.2f} | "
-            f"DD "
-            f"{m['drawdown']:5.2f}R"
+            f"  {signal['signal']}"
         )
 
-    best = threshold_results[0]
+    m = best[
+        "metrics"
+    ]
 
-    return {
-        "model": model,
-        "threshold":
-            best["threshold"],
-        "training_metrics":
-            best["metrics"],
-        "train_indices":
-            train_indices,
-        "train_scores":
-            train_scores,
-    }
+    print()
+    print(
+        f"Trades: "
+        f"{m['trades']}"
+    )
+
+    print(
+        f"Win rate: "
+        f"{m['win_rate']:.2f}%"
+    )
+
+    print(
+        f"Total R: "
+        f"{m['total_r']:.2f}"
+    )
+
+    print(
+        f"Profit factor: "
+        f"{m['profit_factor']:.2f}"
+    )
+
+    print(
+        f"Drawdown: "
+        f"{m['drawdown']:.2f}R"
+    )
+
+    return best
 
 
 # ============================================================
-# OUT OF SAMPLE
+# OOS ENSEMBLE
 # ============================================================
 
-def run_oos(
+def test_oos(
     d,
     timestamps,
-    candidate,
-    model_result,
+    ensemble,
     test_start,
     test_end,
 ):
-
-    params = candidate[
-        "params"
-    ]
-
-    setups = candidate[
-        "setups"
-    ]
 
     bounds = get_bounds(
         timestamps,
@@ -1835,40 +1815,31 @@ def run_oos(
 
     start_idx, end_idx = bounds
 
-    # --------------------------------------------------------
-    # CRITICAL:
-    # Score the unseen period using the
-    # model learned ONLY on training data.
-    # --------------------------------------------------------
-
-    test_indices = setups[
-        (setups >= start_idx)
-        & (setups <= end_idx)
+    indices = ensemble[
+        "indices"
     ]
 
-    scores = score_setups(
+    oos_indices = indices[
+        (indices >= start_idx)
+        & (indices <= end_idx)
+    ]
+
+    if len(oos_indices) == 0:
+        return None
+
+    rr = ensemble[
+        "signals"
+    ][0]["params"][0]
+
+    trades, _ = simulate(
         d,
-        test_indices,
-        model_result["model"],
-    )
-
-    threshold = model_result[
-        "threshold"
-    ]
-
-    selected = test_indices[
-        scores >= threshold
-    ]
-
-    trades = simulate_filtered(
-        d,
-        selected,
-        params[0],
+        oos_indices,
+        rr,
         start_idx,
         end_idx,
     )
 
-    return calculate_metrics(
+    return metrics(
         trades,
         timestamps[start_idx],
         timestamps[end_idx],
@@ -1876,7 +1847,7 @@ def run_oos(
 
 
 # ============================================================
-# RUN PERIOD
+# RUN ONE PERIOD
 # ============================================================
 
 def run_period(
@@ -1899,180 +1870,76 @@ def run_period(
     print("=" * 60)
 
     print(
-        f"{market} V8: "
+        f"{market} V9: "
         f"{period_name}"
     )
 
     print("=" * 60)
 
-    print(
-        "PHASE 1: BASE OPTIMIZATION"
-    )
+    candidates = []
 
-    candidates = optimize_base(
-        d,
-        timestamps,
-        train_start,
-        train_end,
-    )
+    for signal_name, signal_function in (
+        SIGNALS.items()
+    ):
 
-    if not candidates:
+        try:
 
-        print(
-            "No valid base strategies."
-        )
-
-        return None
-
-    candidate = candidates[0]
-
-    params = candidate[
-        "params"
-    ]
-
-    print()
-    print(
-        "BEST BASE STRATEGY"
-    )
-
-    print("-" * 60)
-
-    print(
-        f"Training WR: "
-        f"{candidate['train']['win_rate']:.2f}%"
-    )
-
-    print(
-        f"Training trades: "
-        f"{candidate['train']['trades']}"
-    )
-
-    print(
-        f"Training R: "
-        f"{candidate['train']['total_r']:.2f}"
-    )
-
-    print(
-        f"Recent WR: "
-        f"{candidate['recent']['win_rate']:.2f}%"
-    )
-
-    print(
-        f"Recent trades: "
-        f"{candidate['recent']['trades']}"
-    )
-
-    print()
-    print(
-        "PARAMETERS"
-    )
-
-    print(
-        f"RR: {params[0]}"
-    )
-
-    print(
-        f"Wick: {params[1]}"
-    )
-
-    print(
-        f"Body: {params[2]}"
-    )
-
-    print(
-        f"Separation: {params[3]}"
-    )
-
-    print(
-        f"Max cross: {params[4]}"
-    )
-
-    print(
-        "Hours: "
-        + ",".join(
-            map(
-                str,
-                params[5],
+            candidate = optimise_signal(
+                d,
+                timestamps,
+                signal_name,
+                signal_function,
+                train_start,
+                train_end,
             )
-        )
-    )
 
-    print()
-    print(
-        "PHASE 2: ADAPTIVE FEATURE LEARNING"
-    )
+            if candidate is not None:
+                candidates.append(
+                    candidate
+                )
 
-    model_result = test_score_model(
+        except Exception as error:
+
+            print()
+            print(
+                f"{signal_name} FAILED: "
+                f"{type(error).__name__}: "
+                f"{error}"
+            )
+
+    ensemble = build_ensemble(
         d,
         timestamps,
-        candidate,
+        candidates,
         train_start,
         train_end,
     )
 
-    if model_result is None:
-
+    if ensemble is None:
         print(
-            "Adaptive model could not "
-            "be built."
+            "No valid ensemble."
         )
-
         return None
 
     print()
     print(
-        "SELECTED ADAPTIVE THRESHOLD"
+        "COMPLETELY OUT-OF-SAMPLE TEST"
     )
 
     print("-" * 60)
 
-    print(
-        f"Threshold: "
-        f"{model_result['threshold']:.2f}"
-    )
-
-    tm = model_result[
-        "training_metrics"
-    ]
-
-    print(
-        f"Training trades: "
-        f"{tm['trades']}"
-    )
-
-    print(
-        f"Training WR: "
-        f"{tm['win_rate']:.2f}%"
-    )
-
-    print(
-        f"Training R: "
-        f"{tm['total_r']:.2f}"
-    )
-
-    print()
-    print(
-        "PHASE 3: COMPLETELY "
-        "OUT-OF-SAMPLE TEST"
-    )
-
-    print("-" * 60)
-
-    oos = run_oos(
+    oos = test_oos(
         d,
         timestamps,
-        candidate,
-        model_result,
+        ensemble,
         test_start,
         test_end,
     )
 
     if oos is None:
-
         print(
             "No OOS trades."
         )
-
         return None
 
     print(
@@ -2122,26 +1989,19 @@ def run_period(
 
     rows.append(
         {
-            "market": market,
-            "period": period_name,
+            "market":
+                market,
 
-            "rr": params[0],
-            "wick": params[1],
-            "body": params[2],
-            "separation": params[3],
-            "max_cross": params[4],
+            "period":
+                period_name,
 
-            "hours": ",".join(
-                map(
-                    str,
-                    params[5],
-                )
-            ),
-
-            "adaptive_threshold":
-                model_result[
-                    "threshold"
-                ],
+            "signals":
+                "|".join(
+                    x["signal"]
+                    for x in ensemble[
+                        "signals"
+                    ]
+                ),
 
             "oos_trades":
                 oos["trades"],
@@ -2180,7 +2040,7 @@ def run_period(
 
 
 # ============================================================
-# RUN MARKET
+# MARKET
 # ============================================================
 
 def run_market(
@@ -2192,8 +2052,8 @@ def run_market(
     print("=" * 60)
 
     print(
-        f"{market} V8 ADAPTIVE "
-        "SIGNAL SCORING"
+        f"{market} V9 MULTI-SIGNAL "
+        "ENSEMBLE"
     )
 
     print("=" * 60)
@@ -2207,7 +2067,8 @@ def run_market(
     )
 
     print(
-        f"Candles: {len(df)}"
+        f"Candles: "
+        f"{len(df)}"
     )
 
     print(
@@ -2250,29 +2111,29 @@ def run_market(
                 f"{error}"
             )
 
-    result_df = pd.DataFrame(
+    result = pd.DataFrame(
         rows
     )
 
-    output_path = (
+    path_out = (
         f"data/"
         f"{market.lower()}_"
-        f"optimizer_v8_results.csv"
+        f"optimizer_v9_results.csv"
     )
 
-    result_df.to_csv(
-        output_path,
+    result.to_csv(
+        path_out,
         index=False,
     )
 
-    return result_df
+    return result
 
 
 # ============================================================
 # SUMMARY
 # ============================================================
 
-def market_summary(
+def summarize(
     market,
     df,
 ):
@@ -2298,7 +2159,7 @@ def market_summary(
         ].sum()
     )
 
-    profitable = int(
+    profitable_periods = int(
         (
             df[
                 "oos_total_r"
@@ -2375,7 +2236,7 @@ def market_summary(
             ),
 
         "profitable_periods":
-            f"{profitable}/"
+            f"{profitable_periods}/"
             f"{periods}",
 
         "verdict":
@@ -2393,21 +2254,33 @@ def main():
 
     print(
         "MULTI-MARKET STRATEGY "
-        "OPTIMIZER V8"
+        "OPTIMIZER V9"
     )
 
     print("=" * 60)
 
     print(
-        "ADAPTIVE FEATURE LEARNING: ENABLED"
+        "MULTI-SIGNAL ENSEMBLE: ENABLED"
     )
 
     print(
-        "CONTINUOUS SIGNAL SCORING: ENABLED"
+        "TREND PULLBACK: ENABLED"
     )
 
     print(
-        "SCORE BUCKET ANALYSIS: ENABLED"
+        "TREND MOMENTUM: ENABLED"
+    )
+
+    print(
+        "VOLATILITY EXPANSION: ENABLED"
+    )
+
+    print(
+        "REJECTION / REVERSAL: ENABLED"
+    )
+
+    print(
+        "EMA STRUCTURE: ENABLED"
     )
 
     print(
@@ -2416,14 +2289,6 @@ def main():
 
     print(
         "CURRENT-ERA DATA: ENABLED"
-    )
-
-    print(
-        "PARAMETER SEARCH: ENABLED"
-    )
-
-    print(
-        "MARKETS: XAUUSD, EURUSD"
     )
 
     print(
@@ -2469,13 +2334,13 @@ def main():
 
     summaries = []
 
-    for market, df in (
+    for market, result in (
         results.items()
     ):
 
-        summary = market_summary(
+        summary = summarize(
             market,
-            df,
+            result,
         )
 
         if summary is not None:
@@ -2491,7 +2356,7 @@ def main():
     print("=" * 60)
 
     print(
-        "V8 FINAL MULTI-MARKET SUMMARY"
+        "V9 FINAL MULTI-MARKET SUMMARY"
     )
 
     print("=" * 60)
@@ -2518,25 +2383,25 @@ def main():
     total_wins = 0
     total_r = 0.0
 
-    for df in results.values():
+    for result in results.values():
 
-        if df.empty:
+        if result.empty:
             continue
 
         total_trades += int(
-            df[
+            result[
                 "oos_trades"
             ].sum()
         )
 
         total_wins += int(
-            df[
+            result[
                 "oos_wins"
             ].sum()
         )
 
         total_r += float(
-            df[
+            result[
                 "oos_total_r"
             ].sum()
         )
@@ -2549,6 +2414,27 @@ def main():
         else 0
     )
 
+    profitable_periods = 0
+    total_periods = 0
+
+    for result in results.values():
+
+        if result.empty:
+            continue
+
+        profitable_periods += int(
+            (
+                result[
+                    "oos_total_r"
+                ]
+                > 0
+            ).sum()
+        )
+
+        total_periods += len(
+            result
+        )
+
     print()
     print("=" * 60)
 
@@ -2560,11 +2446,13 @@ def main():
     print("=" * 60)
 
     print(
-        f"Trades: {total_trades}"
+        f"Trades: "
+        f"{total_trades}"
     )
 
     print(
-        f"Wins: {total_wins}"
+        f"Wins: "
+        f"{total_wins}"
     )
 
     print(
@@ -2577,11 +2465,17 @@ def main():
         f"{total_r:.2f}"
     )
 
+    print(
+        f"Profitable periods: "
+        f"{profitable_periods}/"
+        f"{total_periods}"
+    )
+
     print()
     print("=" * 60)
 
     print(
-        "V8 TARGET CHECK"
+        "V9 TARGET CHECK"
     )
 
     print("=" * 60)
@@ -2597,6 +2491,10 @@ def main():
     print(
         "200+ GENUINELY "
         "OUT-OF-SAMPLE TRADES"
+    )
+
+    print(
+        "POSITIVE TOTAL R"
     )
 
     print()
@@ -2646,23 +2544,18 @@ def main():
     )
 
     print(
-        "The adaptive model is trained "
-        "only on the training period."
+        "OOS data is never used "
+        "to optimise the signal."
     )
 
     print(
-        "The OOS periods are never used "
-        "to train the model."
-    )
-
-    print(
-        "Do not implement live from "
-        "this optimizer alone."
+        "Do not implement live "
+        "from this optimizer alone."
     )
 
     summary_path = (
         "data/"
-        "multi_market_optimizer_v8_summary.csv"
+        "multi_market_optimizer_v9_summary.csv"
     )
 
     summary_df.to_csv(
@@ -2677,24 +2570,24 @@ def main():
 
     print(
         "data/"
-        "xauusd_optimizer_v8_results.csv"
+        "xauusd_optimizer_v9_results.csv"
     )
 
     print(
         "data/"
-        "eurusd_optimizer_v8_results.csv"
+        "eurusd_optimizer_v9_results.csv"
     )
 
     print(
         "data/"
-        "multi_market_optimizer_v8_summary.csv"
+        "multi_market_optimizer_v9_summary.csv"
     )
 
     print()
     print("=" * 60)
 
     print(
-        "OPTIMIZER V8 COMPLETE"
+        "OPTIMIZER V9 COMPLETE"
     )
 
     print("=" * 60)
