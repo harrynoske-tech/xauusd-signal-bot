@@ -5,36 +5,45 @@ import pandas as pd
 
 
 # ============================================================
-# MULTI-MARKET STRATEGY OPTIMIZER V9
+# MULTI-MARKET STRATEGY OPTIMIZER V9.1
 # ============================================================
 #
-# MULTI-SIGNAL ENSEMBLE
+# FAST MULTI-SIGNAL ENSEMBLE
 #
-# V8 proved that adaptive scoring can separate setups during
-# training, but the OOS sample was too small.
+# V9 was too computationally expensive:
+# 5 signal families x 4,320 combinations x 3 periods
+# x 2 markets.
 #
-# V9 therefore tests several independently defined signal
-# families and combines only signals that demonstrate an edge
-# during TRAINING.
+# V9.1 uses a TWO-STAGE SEARCH:
 #
-# SIGNALS
-# -------
-# 1. TREND PULLBACK
-# 2. TREND MOMENTUM
-# 3. VOLATILITY EXPANSION
-# 4. REJECTION / REVERSAL
-# 5. EMA STRUCTURE
+# PHASE 1:
+#   Fast coarse search across all signal families.
 #
-# IMPORTANT:
-# - No OOS data is used for optimisation.
-# - No live trading.
-# - Every OOS result is genuinely unseen by the optimiser.
+# PHASE 2:
+#   Only the strongest candidates receive the full test.
 #
-# TARGET:
+# This allows the complete walk-forward process to finish.
+#
+# SIGNAL FAMILIES
+# ----------------
+# 1. TREND_PULLBACK
+# 2. TREND_MOMENTUM
+# 3. VOLATILITY_EXPANSION
+# 4. REJECTION_REVERSAL
+# 5. EMA_STRUCTURE
+#
+# IMPORTANT
+# ---------
+# OOS data is NEVER used for optimisation.
+#
+# TARGET
+# ------
 # ~82% win rate
 # 200+ genuinely OOS trades
-# Positive R
+# Positive total R
 # Robust across XAUUSD + EURUSD
+#
+# NO LIVE TRADING
 # ============================================================
 
 
@@ -43,6 +52,10 @@ MARKETS = {
     "EURUSD": "data/EURUSD_15m.csv",
 }
 
+
+# ============================================================
+# WALK-FORWARD PERIODS
+# ============================================================
 
 PERIODS = [
     (
@@ -70,10 +83,46 @@ PERIODS = [
 
 
 # ============================================================
-# SEARCH SPACE
+# PHASE 1 — COARSE SEARCH
 # ============================================================
 
-RR_VALUES = [
+COARSE_RR = [
+    0.60,
+    0.90,
+    1.20,
+]
+
+COARSE_WICK = [
+    0.20,
+    0.30,
+]
+
+COARSE_BODY = [
+    0.20,
+    0.30,
+]
+
+COARSE_SEPARATION = [
+    0.0005,
+    0.0010,
+]
+
+COARSE_CROSS = [
+    20,
+    40,
+]
+
+COARSE_HOURS = [
+    (3, 4, 5),
+    (3, 4, 5, 12, 13),
+]
+
+
+# ============================================================
+# PHASE 2 — FINE SEARCH
+# ============================================================
+
+FINE_RR = [
     0.50,
     0.60,
     0.75,
@@ -82,33 +131,33 @@ RR_VALUES = [
     1.25,
 ]
 
-WICK_VALUES = [
+FINE_WICK = [
     0.20,
     0.25,
     0.30,
     0.35,
 ]
 
-BODY_VALUES = [
+FINE_BODY = [
     0.20,
     0.25,
     0.30,
     0.35,
 ]
 
-SEPARATION_VALUES = [
+FINE_SEPARATION = [
     0.0005,
     0.0008,
     0.0010,
 ]
 
-MAX_CROSS_VALUES = [
+FINE_CROSS = [
     20,
     30,
     40,
 ]
 
-HOUR_SETS = [
+FINE_HOURS = [
     (2, 3, 4),
     (3, 4, 5),
     (2, 3, 4, 5),
@@ -117,15 +166,26 @@ HOUR_SETS = [
 ]
 
 
-MIN_TRAIN_TRADES = 25
-MIN_SIGNAL_TRADES = 12
-MIN_OOS_TRADES = 5
+# ============================================================
+# CONTROL PARAMETERS
+# ============================================================
 
-RECENT_DAYS = 365
+MIN_TRAIN_TRADES = 20
+MIN_SIGNAL_TRADES = 10
+
+TOP_COARSE_PER_SIGNAL = 8
+
+MAX_ENSEMBLE_SIGNALS = 3
+
+MAX_HOLD_BARS = 96
+
+# Require at least this many trades for a
+# candidate to be considered statistically useful.
+MIN_USEFUL_TRADES = 15
 
 
 # ============================================================
-# TIME HELPERS
+# TIME
 # ============================================================
 
 def utc(value):
@@ -171,6 +231,7 @@ def get_bounds(index, start, end):
 def load_data(path):
 
     if not os.path.exists(path):
+
         raise RuntimeError(
             f"Missing data file: {path}"
         )
@@ -178,8 +239,8 @@ def load_data(path):
     df = pd.read_csv(path)
 
     df.columns = [
-        str(x).strip()
-        for x in df.columns
+        str(c).strip()
+        for c in df.columns
     ]
 
     time_col = None
@@ -194,10 +255,12 @@ def load_data(path):
     ]:
 
         if col in df.columns:
+
             time_col = col
             break
 
     if time_col is None:
+
         raise RuntimeError(
             "Could not find timestamp column."
         )
@@ -207,7 +270,9 @@ def load_data(path):
         utc=True,
     )
 
-    df = df.set_index(time_col)
+    df = df.set_index(
+        time_col
+    )
 
     rename = {}
 
@@ -241,6 +306,7 @@ def load_data(path):
     for col in required:
 
         if col not in df.columns:
+
             raise RuntimeError(
                 f"Missing column: {col}"
             )
@@ -310,7 +376,9 @@ def prepare_indicators(df):
 
     candle_range = h - l
 
-    body = np.abs(c - o)
+    body = np.abs(
+        c - o
+    )
 
     body_ratio = np.divide(
         body,
@@ -341,18 +409,27 @@ def prepare_indicators(df):
         where=candle_range > 0,
     )
 
-    previous_close = np.roll(c, 1)
+    previous_close = np.roll(
+        c,
+        1,
+    )
 
     true_range = np.maximum.reduce(
         [
             h - l,
-            np.abs(h - previous_close),
-            np.abs(l - previous_close),
+            np.abs(
+                h - previous_close
+            ),
+            np.abs(
+                l - previous_close
+            ),
         ]
     )
 
     atr = (
-        pd.Series(true_range)
+        pd.Series(
+            true_range
+        )
         .rolling(
             14,
             min_periods=14,
@@ -362,7 +439,9 @@ def prepare_indicators(df):
     )
 
     atr50 = (
-        pd.Series(atr)
+        pd.Series(
+            atr
+        )
         .rolling(
             50,
             min_periods=20,
@@ -372,7 +451,9 @@ def prepare_indicators(df):
     )
 
     atr100 = (
-        pd.Series(atr)
+        pd.Series(
+            atr
+        )
         .rolling(
             100,
             min_periods=30,
@@ -396,7 +477,10 @@ def prepare_indicators(df):
     )
 
     ema20_slope = np.divide(
-        ema20 - np.roll(ema20, 4),
+        ema20 - np.roll(
+            ema20,
+            4,
+        ),
         np.where(
             ema20 == 0,
             1,
@@ -405,7 +489,10 @@ def prepare_indicators(df):
     )
 
     ema50_slope = np.divide(
-        ema50 - np.roll(ema50, 8),
+        ema50 - np.roll(
+            ema50,
+            8,
+        ),
         np.where(
             ema50 == 0,
             1,
@@ -414,7 +501,10 @@ def prepare_indicators(df):
     )
 
     ema100_slope = np.divide(
-        ema100 - np.roll(ema100, 12),
+        ema100 - np.roll(
+            ema100,
+            12,
+        ),
         np.where(
             ema100 == 0,
             1,
@@ -423,7 +513,10 @@ def prepare_indicators(df):
     )
 
     ema200_slope = np.divide(
-        ema200 - np.roll(ema200, 16),
+        ema200 - np.roll(
+            ema200,
+            16,
+        ),
         np.where(
             ema200 == 0,
             1,
@@ -432,7 +525,10 @@ def prepare_indicators(df):
     )
 
     momentum4 = np.divide(
-        c - np.roll(c, 4),
+        c - np.roll(
+            c,
+            4,
+        ),
         np.where(
             np.roll(c, 4) == 0,
             1,
@@ -441,7 +537,10 @@ def prepare_indicators(df):
     )
 
     momentum8 = np.divide(
-        c - np.roll(c, 8),
+        c - np.roll(
+            c,
+            8,
+        ),
         np.where(
             np.roll(c, 8) == 0,
             1,
@@ -450,7 +549,10 @@ def prepare_indicators(df):
     )
 
     momentum16 = np.divide(
-        c - np.roll(c, 16),
+        c - np.roll(
+            c,
+            16,
+        ),
         np.where(
             np.roll(c, 16) == 0,
             1,
@@ -459,16 +561,9 @@ def prepare_indicators(df):
     )
 
     separation20_50 = np.divide(
-        np.abs(ema20 - ema50),
-        np.where(
-            c == 0,
-            1,
-            c,
+        np.abs(
+            ema20 - ema50
         ),
-    )
-
-    separation50_100 = np.divide(
-        np.abs(ema50 - ema100),
         np.where(
             c == 0,
             1,
@@ -514,26 +609,6 @@ def prepare_indicators(df):
         .to_numpy()
     )
 
-    high20 = (
-        pd.Series(h)
-        .rolling(
-            20,
-            min_periods=1,
-        )
-        .max()
-        .to_numpy()
-    )
-
-    low20 = (
-        pd.Series(l)
-        .rolling(
-            20,
-            min_periods=1,
-        )
-        .min()
-        .to_numpy()
-    )
-
     close_location = np.divide(
         c - l,
         candle_range,
@@ -551,19 +626,18 @@ def prepare_indicators(df):
         where=atr > 0,
     )
 
-    prior_range = np.roll(
+    previous_range = np.roll(
         candle_range,
         1,
     )
 
     range_change = np.divide(
         candle_range,
-        prior_range,
+        previous_range,
         out=np.ones_like(c),
-        where=prior_range > 0,
+        where=previous_range > 0,
     )
 
-    # Age since EMA20/EMA50 relationship changed.
     trend_cross_age = np.full(
         len(c),
         9999,
@@ -588,9 +662,11 @@ def prepare_indicators(df):
         )
 
         if previous_state != current_state:
+
             last_cross = i
 
         if last_cross >= 0:
+
             trend_cross_age[i] = (
                 i - last_cross
             )
@@ -665,20 +741,12 @@ def prepare_indicators(df):
         "ema100": ema100,
         "ema200": ema200,
 
-        "ema20_slope":
-            ema20_slope,
+        "ema20_slope": ema20_slope,
+        "ema50_slope": ema50_slope,
+        "ema100_slope": ema100_slope,
+        "ema200_slope": ema200_slope,
 
-        "ema50_slope":
-            ema50_slope,
-
-        "ema100_slope":
-            ema100_slope,
-
-        "ema200_slope":
-            ema200_slope,
-
-        "body_ratio":
-            body_ratio,
+        "body_ratio": body_ratio,
 
         "upper_wick_ratio":
             upper_wick_ratio,
@@ -686,47 +754,23 @@ def prepare_indicators(df):
         "lower_wick_ratio":
             lower_wick_ratio,
 
-        "atr":
-            atr,
-
-        "atr_ratio":
-            atr_ratio,
-
+        "atr": atr,
+        "atr_ratio": atr_ratio,
         "atr_acceleration":
             atr_acceleration,
 
-        "momentum4":
-            momentum4,
-
-        "momentum8":
-            momentum8,
-
-        "momentum16":
-            momentum16,
+        "momentum4": momentum4,
+        "momentum8": momentum8,
+        "momentum16": momentum16,
 
         "separation20_50":
             separation20_50,
 
-        "separation50_100":
-            separation50_100,
+        "distance20": distance20,
+        "distance50": distance50,
 
-        "distance20":
-            distance20,
-
-        "distance50":
-            distance50,
-
-        "high8":
-            high8,
-
-        "low8":
-            low8,
-
-        "high20":
-            high20,
-
-        "low20":
-            low20,
+        "high8": high8,
+        "low8": low8,
 
         "close_location":
             close_location,
@@ -740,79 +784,19 @@ def prepare_indicators(df):
         "trend_cross_age":
             trend_cross_age,
 
-        "bearish3":
-            bearish3,
+        "bearish3": bearish3,
+        "bearish5": bearish5,
 
-        "bearish5":
-            bearish5,
+        "bullish3": bullish3,
+        "bullish5": bullish5,
 
-        "bullish3":
-            bullish3,
-
-        "bullish5":
-            bullish5,
-
-        "hours":
-            hours,
+        "hours": hours,
     }
 
 
 # ============================================================
 # TRADE ENGINE
 # ============================================================
-
-def single_trade(
-    d,
-    index,
-    rr,
-    end_idx,
-):
-
-    entry = d["close"][index]
-
-    atr = d["atr"][index]
-
-    if not np.isfinite(atr):
-        return None
-
-    if atr <= 0:
-        return None
-
-    stop = entry + atr
-
-    target = entry - (
-        atr * rr
-    )
-
-    for j in range(
-        index + 1,
-        end_idx + 1,
-    ):
-
-        stop_hit = (
-            d["high"][j]
-            >= stop
-        )
-
-        target_hit = (
-            d["low"][j]
-            <= target
-        )
-
-        if (
-            stop_hit
-            and target_hit
-        ):
-            return -1.0, j
-
-        if stop_hit:
-            return -1.0, j
-
-        if target_hit:
-            return rr, j
-
-    return None
-
 
 def simulate(
     d,
@@ -822,57 +806,138 @@ def simulate(
     end_idx,
 ):
 
+    if len(indices) == 0:
+        return []
+
     trades = []
 
-    exits = []
+    next_allowed = start_idx
 
-    next_available = (
-        start_idx
-    )
+    for signal_idx in indices:
 
-    for index in indices:
+        signal_idx = int(
+            signal_idx
+        )
 
-        if index < start_idx:
+        if signal_idx < start_idx:
             continue
 
-        if index > end_idx:
+        if signal_idx > end_idx:
             break
 
-        if index < next_available:
+        if signal_idx < next_allowed:
             continue
 
-        result = single_trade(
-            d,
-            index,
-            rr,
+        entry = d[
+            "close"
+        ][signal_idx]
+
+        atr = d[
+            "atr"
+        ][signal_idx]
+
+        if not np.isfinite(atr):
+            continue
+
+        if atr <= 0:
+            continue
+
+        stop = (
+            entry + atr
+        )
+
+        target = (
+            entry
+            - atr * rr
+        )
+
+        final_idx = min(
+            signal_idx
+            + MAX_HOLD_BARS,
             end_idx,
         )
 
-        if result is None:
-            continue
+        result = None
+        exit_idx = final_idx
 
-        r_value, exit_idx = result
+        for j in range(
+            signal_idx + 1,
+            final_idx + 1,
+        ):
+
+            stop_hit = (
+                d["high"][j]
+                >= stop
+            )
+
+            target_hit = (
+                d["low"][j]
+                <= target
+            )
+
+            if (
+                stop_hit
+                and target_hit
+            ):
+
+                result = -1.0
+                exit_idx = j
+                break
+
+            if stop_hit:
+
+                result = -1.0
+                exit_idx = j
+                break
+
+            if target_hit:
+
+                result = rr
+                exit_idx = j
+                break
+
+        if result is None:
+
+            # A trade that reaches neither
+            # target nor stop is closed at
+            # the final available price.
+            exit_price = d[
+                "close"
+            ][exit_idx]
+
+            move = (
+                entry
+                - exit_price
+            )
+
+            result = (
+                move / atr
+            )
+
+            result = float(
+                np.clip(
+                    result,
+                    -1.0,
+                    rr,
+                )
+            )
 
         trades.append(
-            float(r_value)
+            float(result)
         )
 
-        exits.append(
-            int(exit_idx)
-        )
-
-        next_available = (
+        next_allowed = (
             exit_idx + 1
         )
 
-    return trades, exits
+    return trades
 
 
 # ============================================================
 # METRICS
 # ============================================================
 
-def metrics(
+def calculate_metrics(
     trades,
     start_time,
     end_time,
@@ -886,10 +951,18 @@ def metrics(
         dtype=float,
     )
 
-    wins = values > 0
-    losses = values < 0
+    wins = (
+        values > 0
+    )
 
-    count = len(values)
+    losses = (
+        values < 0
+    )
+
+    trade_count = len(
+        values
+    )
+
     win_count = int(
         wins.sum()
     )
@@ -904,12 +977,16 @@ def metrics(
         )
     )
 
-    pf = (
-        gross_profit
-        / gross_loss
-        if gross_loss > 0
-        else 999.0
-    )
+    if gross_loss > 0:
+
+        pf = (
+            gross_profit
+            / gross_loss
+        )
+
+    else:
+
+        pf = 999.0
 
     equity = np.cumsum(
         values
@@ -919,29 +996,29 @@ def metrics(
         equity
     )
 
-    dd = float(
+    drawdown = float(
         np.max(
             peak - equity
         )
     )
 
-    streak = 0
-    longest = 0
+    losing_streak = 0
+    longest_streak = 0
 
     for value in values:
 
         if value < 0:
 
-            streak += 1
+            losing_streak += 1
 
-            longest = max(
-                longest,
-                streak,
+            longest_streak = max(
+                longest_streak,
+                losing_streak,
             )
 
         else:
 
-            streak = 0
+            losing_streak = 0
 
     start = pd.Timestamp(
         start_time
@@ -961,7 +1038,7 @@ def metrics(
 
     return {
         "trades":
-            count,
+            trade_count,
 
         "wins":
             win_count,
@@ -971,7 +1048,7 @@ def metrics(
 
         "win_rate":
             win_count
-            / count
+            / trade_count
             * 100,
 
         "total_r":
@@ -981,13 +1058,13 @@ def metrics(
             float(pf),
 
         "drawdown":
-            dd,
+            drawdown,
 
         "longest_losing_streak":
-            longest,
+            longest_streak,
 
         "trades_per_week":
-            count
+            trade_count
             / (days / 7),
     }
 
@@ -996,9 +1073,9 @@ def metrics(
 # SIGNAL FAMILIES
 # ============================================================
 
-def trend_pullback(
+def signal_trend_pullback(
     d,
-    params,
+    p,
 ):
 
     (
@@ -1008,7 +1085,7 @@ def trend_pullback(
         separation,
         max_cross,
         hours,
-    ) = params
+    ) = p
 
     mask = (
         np.isin(
@@ -1070,19 +1147,16 @@ def trend_pullback(
             d["close"]
             < d["ema20"]
         )
-
-        & (
-            d["close"]
-            > d["low8"]
-        )
     )
 
-    return np.flatnonzero(mask)
+    return np.flatnonzero(
+        mask
+    )
 
 
-def trend_momentum(
+def signal_trend_momentum(
     d,
-    params,
+    p,
 ):
 
     (
@@ -1092,7 +1166,7 @@ def trend_momentum(
         separation,
         max_cross,
         hours,
-    ) = params
+    ) = p
 
     mask = (
         np.isin(
@@ -1136,11 +1210,6 @@ def trend_momentum(
         )
 
         & (
-            d["momentum16"]
-            < 0
-        )
-
-        & (
             d["body_ratio"]
             >= body
         )
@@ -1156,12 +1225,14 @@ def trend_momentum(
         )
     )
 
-    return np.flatnonzero(mask)
+    return np.flatnonzero(
+        mask
+    )
 
 
-def volatility_expansion(
+def signal_volatility_expansion(
     d,
-    params,
+    p,
 ):
 
     (
@@ -1171,7 +1242,7 @@ def volatility_expansion(
         separation,
         max_cross,
         hours,
-    ) = params
+    ) = p
 
     mask = (
         np.isin(
@@ -1230,12 +1301,14 @@ def volatility_expansion(
         )
     )
 
-    return np.flatnonzero(mask)
+    return np.flatnonzero(
+        mask
+    )
 
 
-def rejection_reversal(
+def signal_rejection_reversal(
     d,
-    params,
+    p,
 ):
 
     (
@@ -1245,7 +1318,7 @@ def rejection_reversal(
         separation,
         max_cross,
         hours,
-    ) = params
+    ) = p
 
     mask = (
         np.isin(
@@ -1289,12 +1362,14 @@ def rejection_reversal(
         )
     )
 
-    return np.flatnonzero(mask)
+    return np.flatnonzero(
+        mask
+    )
 
 
-def ema_structure(
+def signal_ema_structure(
     d,
-    params,
+    p,
 ):
 
     (
@@ -1304,7 +1379,7 @@ def ema_structure(
         separation,
         max_cross,
         hours,
-    ) = params
+    ) = p
 
     mask = (
         np.isin(
@@ -1361,59 +1436,222 @@ def ema_structure(
         )
     )
 
-    return np.flatnonzero(mask)
+    return np.flatnonzero(
+        mask
+    )
 
 
 SIGNALS = {
     "TREND_PULLBACK":
-        trend_pullback,
+        signal_trend_pullback,
 
     "TREND_MOMENTUM":
-        trend_momentum,
+        signal_trend_momentum,
 
     "VOLATILITY_EXPANSION":
-        volatility_expansion,
+        signal_volatility_expansion,
 
     "REJECTION_REVERSAL":
-        rejection_reversal,
+        signal_rejection_reversal,
 
     "EMA_STRUCTURE":
-        ema_structure,
+        signal_ema_structure,
 }
 
 
 # ============================================================
-# SIGNAL OPTIMISATION
+# FAST SEARCH
 # ============================================================
 
-def optimise_signal(
+def search_signal(
     d,
     timestamps,
     signal_name,
     signal_function,
     train_start,
     train_end,
+    fine=False,
 ):
 
-    combinations = list(
-        itertools.product(
-            RR_VALUES,
-            WICK_VALUES,
-            BODY_VALUES,
-            SEPARATION_VALUES,
-            MAX_CROSS_VALUES,
-            HOUR_SETS,
+    if fine:
+
+        grid = itertools.product(
+            FINE_RR,
+            FINE_WICK,
+            FINE_BODY,
+            FINE_SEPARATION,
+            FINE_CROSS,
+            FINE_HOURS,
         )
+
+    else:
+
+        grid = itertools.product(
+            COARSE_RR,
+            COARSE_WICK,
+            COARSE_BODY,
+            COARSE_SEPARATION,
+            COARSE_CROSS,
+            COARSE_HOURS,
+        )
+
+    bounds = get_bounds(
+        timestamps,
+        train_start,
+        train_end,
     )
 
-    best = None
+    if bounds is None:
+        return []
+
+    start_idx, end_idx = bounds
+
+    candidates = []
+
+    for p in grid:
+
+        indices = signal_function(
+            d,
+            p,
+        )
+
+        if len(indices) < MIN_SIGNAL_TRADES:
+
+            continue
+
+        trades = simulate(
+            d,
+            indices,
+            p[0],
+            start_idx,
+            end_idx,
+        )
+
+        m = calculate_metrics(
+            trades,
+            timestamps[start_idx],
+            timestamps[end_idx],
+        )
+
+        if m is None:
+            continue
+
+        if m["trades"] < MIN_SIGNAL_TRADES:
+            continue
+
+        # ----------------------------------------------------
+        # Training score.
+        #
+        # Win rate is important, but we deliberately include
+        # total R, PF, sample size and drawdown so the optimiser
+        # cannot simply select tiny high-WR samples.
+        # ----------------------------------------------------
+
+        score = (
+            m["win_rate"]
+            * 1.2
+            + m["total_r"]
+            * 3.0
+            + min(
+                m["profit_factor"],
+                4.0,
+            )
+            * 8.0
+            + np.log1p(
+                m["trades"]
+            )
+            * 3.0
+            - m["drawdown"]
+            * 2.5
+        )
+
+        if (
+            m["trades"]
+            < MIN_USEFUL_TRADES
+        ):
+
+            score -= 10
+
+        candidates.append(
+            {
+                "signal":
+                    signal_name,
+
+                "params":
+                    p,
+
+                "indices":
+                    indices,
+
+                "metrics":
+                    m,
+
+                "score":
+                    score,
+            }
+        )
+
+    candidates.sort(
+        key=lambda x: x["score"],
+        reverse=True,
+    )
+
+    return candidates[
+        :TOP_COARSE_PER_SIGNAL
+    ]
+
+
+# ============================================================
+# ENSEMBLE
+# ============================================================
+
+def build_ensemble(
+    d,
+    timestamps,
+    candidates,
+    train_start,
+    train_end,
+):
+
+    valid = []
+
+    for signal_name in SIGNALS:
+
+        signal_candidates = [
+            x
+            for x in candidates
+            if x["signal"]
+            == signal_name
+        ]
+
+        if not signal_candidates:
+            continue
+
+        valid.append(
+            signal_candidates[0]
+        )
+
+    if not valid:
+        return None
 
     print()
     print(
-        f"{signal_name}: "
-        f"{len(combinations)} "
-        f"combinations"
+        "TOP SIGNAL CANDIDATES"
     )
+
+    print("-" * 60)
+
+    for c in valid:
+
+        m = c["metrics"]
+
+        print(
+            f"{c['signal']:24s} "
+            f"Trades {m['trades']:3d} | "
+            f"WR {m['win_rate']:6.2f}% | "
+            f"R {m['total_r']:7.2f} | "
+            f"PF {m['profit_factor']:5.2f}"
+        )
 
     bounds = get_bounds(
         timestamps,
@@ -1426,190 +1664,24 @@ def optimise_signal(
 
     start_idx, end_idx = bounds
 
-    for number, params in enumerate(
-        combinations,
-        start=1,
-    ):
-
-        if (
-            number == 1
-            or number % 1000 == 0
-            or number == len(combinations)
-        ):
-
-            print(
-                f"{signal_name} progress: "
-                f"{number}/"
-                f"{len(combinations)}",
-                flush=True,
-            )
-
-        indices = signal_function(
-            d,
-            params,
-        )
-
-        if len(indices) < MIN_SIGNAL_TRADES:
-            continue
-
-        trades, _ = simulate(
-            d,
-            indices,
-            params[0],
-            start_idx,
-            end_idx,
-        )
-
-        m = metrics(
-            trades,
-            timestamps[start_idx],
-            timestamps[end_idx],
-        )
-
-        if m is None:
-            continue
-
-        if m["trades"] < MIN_SIGNAL_TRADES:
-            continue
-
-        # We want a genuine edge, not just
-        # a high win rate with tiny sample.
-        score = (
-            m["win_rate"]
-            * 1.0
-            + m["total_r"]
-            * 3.0
-            + min(
-                m["profit_factor"],
-                3,
-            )
-            * 8.0
-            - m["drawdown"]
-            * 2.0
-        )
-
-        if m["trades"] < 20:
-            score -= 5
-
-        candidate = {
-            "signal":
-                signal_name,
-
-            "params":
-                params,
-
-            "indices":
-                indices,
-
-            "metrics":
-                m,
-
-            "score":
-                score,
-        }
-
-        if (
-            best is None
-            or candidate["score"]
-            > best["score"]
-        ):
-
-            best = candidate
-
-    return best
-
-
-# ============================================================
-# ENSEMBLE SELECTION
-# ============================================================
-
-def build_ensemble(
-    d,
-    timestamps,
-    signal_candidates,
-    train_start,
-    train_end,
-):
-
-    valid = [
-        x
-        for x in signal_candidates
-        if x is not None
-    ]
-
-    if not valid:
-        return None
-
-    print()
-    print(
-        "SIGNAL CANDIDATES"
-    )
-
-    print("-" * 60)
-
-    for candidate in valid:
-
-        m = candidate[
-            "metrics"
-        ]
-
-        print(
-            f"{candidate['signal']:24s} "
-            f"Trades {m['trades']:3d} | "
-            f"WR {m['win_rate']:6.2f}% | "
-            f"R {m['total_r']:7.2f} | "
-            f"PF {m['profit_factor']:5.2f}"
-        )
-
-    # --------------------------------------------------------
-    # Only retain signals that show a meaningful training edge.
-    # --------------------------------------------------------
-
-    strong = []
-
-    for candidate in valid:
-
-        m = candidate[
-            "metrics"
-        ]
-
-        if (
-            m["trades"] >= MIN_SIGNAL_TRADES
-            and m["win_rate"] >= 55
-            and m["total_r"] > 0
-            and m["profit_factor"] > 1.05
-        ):
-
-            strong.append(
-                candidate
-            )
-
-    if not strong:
-
-        print()
-        print(
-            "No strong signals."
-        )
-
-        return None
-
-    # --------------------------------------------------------
-    # Test all useful combinations.
-    # --------------------------------------------------------
-
     best = None
 
-    for count in range(
+    # --------------------------------------------------------
+    # Test single signals and combinations.
+    # Maximum 3 signals.
+    # --------------------------------------------------------
+
+    for size in range(
         1,
         min(
-            len(strong),
-            4,
+            MAX_ENSEMBLE_SIGNALS,
+            len(valid),
         ) + 1,
     ):
 
         for combination in itertools.combinations(
-            strong,
-            count,
+            valid,
+            size,
         ):
 
             union = np.unique(
@@ -1621,26 +1693,27 @@ def build_ensemble(
                 )
             )
 
-            bounds = get_bounds(
-                timestamps,
-                train_start,
-                train_end,
+            # Use the RR belonging to the strongest
+            # candidate in the ensemble.
+            strongest = max(
+                combination,
+                key=lambda x:
+                x["score"],
             )
 
-            if bounds is None:
-                continue
+            rr = strongest[
+                "params"
+            ][0]
 
-            start_idx, end_idx = bounds
-
-            trades, exits = simulate(
+            trades = simulate(
                 d,
                 union,
-                combination[0]["params"][0],
+                rr,
                 start_idx,
                 end_idx,
             )
 
-            m = metrics(
+            m = calculate_metrics(
                 trades,
                 timestamps[start_idx],
                 timestamps[end_idx],
@@ -1649,11 +1722,12 @@ def build_ensemble(
             if m is None:
                 continue
 
-            if m["trades"] < MIN_TRAIN_TRADES:
+            if (
+                m["trades"]
+                < MIN_TRAIN_TRADES
+            ):
                 continue
 
-            # Reward high WR, positive R,
-            # PF and sample size.
             score = (
                 m["win_rate"]
                 * 1.5
@@ -1661,66 +1735,74 @@ def build_ensemble(
                 * 3.0
                 + min(
                     m["profit_factor"],
-                    3,
+                    4.0,
                 )
-                * 10
+                * 10.0
                 + np.log1p(
                     m["trades"]
-                ) * 5
+                )
+                * 4.0
                 - m["drawdown"]
-                * 2
+                * 2.0
             )
 
-            # Penalise overly correlated
-            # combinations which only duplicate
-            # the same trades.
-            trade_sets = [
-                set(
-                    x["indices"]
-                    .tolist()
-                )
-                for x in combination
-            ]
+            # ------------------------------------------------
+            # Penalise duplicate signals.
+            # ------------------------------------------------
 
-            overlap_penalty = 0.0
+            duplicate_penalty = 0.0
 
             for a in range(
-                len(trade_sets)
+                len(combination)
             ):
 
                 for b in range(
                     a + 1,
-                    len(trade_sets)
+                    len(combination)
                 ):
 
+                    ia = set(
+                        combination[a][
+                            "indices"
+                        ].tolist()
+                    )
+
+                    ib = set(
+                        combination[b][
+                            "indices"
+                        ].tolist()
+                    )
+
                     union_size = len(
-                        trade_sets[a]
-                        | trade_sets[b]
+                        ia | ib
                     )
 
-                    intersection = len(
-                        trade_sets[a]
-                        & trade_sets[b]
-                    )
+                    if union_size:
 
-                    if union_size > 0:
-
-                        overlap_penalty += (
-                            intersection
+                        overlap = (
+                            len(
+                                ia & ib
+                            )
                             / union_size
-                            * 10
+                        )
+
+                        duplicate_penalty += (
+                            overlap * 15
                         )
 
             score -= (
-                overlap_penalty
+                duplicate_penalty
             )
 
-            ensemble = {
+            candidate = {
                 "signals":
                     combination,
 
                 "indices":
                     union,
+
+                "rr":
+                    rr,
 
                 "metrics":
                     m,
@@ -1731,11 +1813,11 @@ def build_ensemble(
 
             if (
                 best is None
-                or score
+                or candidate["score"]
                 > best["score"]
             ):
 
-                best = ensemble
+                best = candidate
 
     if best is None:
         return None
@@ -1746,10 +1828,6 @@ def build_ensemble(
     )
 
     print("-" * 60)
-
-    print(
-        "Signals:"
-    )
 
     for signal in best[
         "signals"
@@ -1765,35 +1843,40 @@ def build_ensemble(
 
     print()
     print(
-        f"Trades: "
+        f"Training trades: "
         f"{m['trades']}"
     )
 
     print(
-        f"Win rate: "
+        f"Training WR: "
         f"{m['win_rate']:.2f}%"
     )
 
     print(
-        f"Total R: "
+        f"Training R: "
         f"{m['total_r']:.2f}"
     )
 
     print(
-        f"Profit factor: "
+        f"Training PF: "
         f"{m['profit_factor']:.2f}"
     )
 
     print(
-        f"Drawdown: "
+        f"Training DD: "
         f"{m['drawdown']:.2f}R"
+    )
+
+    print(
+        f"RR: "
+        f"{best['rr']}"
     )
 
     return best
 
 
 # ============================================================
-# OOS ENSEMBLE
+# OOS TEST
 # ============================================================
 
 def test_oos(
@@ -1827,19 +1910,15 @@ def test_oos(
     if len(oos_indices) == 0:
         return None
 
-    rr = ensemble[
-        "signals"
-    ][0]["params"][0]
-
-    trades, _ = simulate(
+    trades = simulate(
         d,
         oos_indices,
-        rr,
+        ensemble["rr"],
         start_idx,
         end_idx,
     )
 
-    return metrics(
+    return calculate_metrics(
         trades,
         timestamps[start_idx],
         timestamps[end_idx],
@@ -1847,7 +1926,7 @@ def test_oos(
 
 
 # ============================================================
-# RUN ONE PERIOD
+# ONE WALK-FORWARD PERIOD
 # ============================================================
 
 def run_period(
@@ -1855,7 +1934,7 @@ def run_period(
     d,
     timestamps,
     period,
-    rows,
+    output_rows,
 ):
 
     (
@@ -1870,60 +1949,186 @@ def run_period(
     print("=" * 60)
 
     print(
-        f"{market} V9: "
+        f"{market} V9.1: "
         f"{period_name}"
     )
 
     print("=" * 60)
 
-    candidates = []
+    # ========================================================
+    # PHASE 1
+    # ========================================================
+
+    print(
+        "PHASE 1: FAST COARSE SEARCH"
+    )
+
+    all_candidates = []
 
     for signal_name, signal_function in (
         SIGNALS.items()
     ):
 
-        try:
+        print(
+            f"{signal_name}: "
+            "coarse search"
+        )
 
-            candidate = optimise_signal(
-                d,
-                timestamps,
-                signal_name,
-                signal_function,
-                train_start,
-                train_end,
-            )
+        candidates = search_signal(
+            d,
+            timestamps,
+            signal_name,
+            signal_function,
+            train_start,
+            train_end,
+            fine=False,
+        )
 
-            if candidate is not None:
-                candidates.append(
-                    candidate
-                )
+        all_candidates.extend(
+            candidates
+        )
 
-        except Exception as error:
+        if candidates:
 
-            print()
+            best = candidates[0]
+            m = best["metrics"]
+
             print(
-                f"{signal_name} FAILED: "
-                f"{type(error).__name__}: "
-                f"{error}"
+                f"  Best: "
+                f"{m['trades']} trades | "
+                f"{m['win_rate']:.2f}% WR | "
+                f"{m['total_r']:.2f}R"
             )
+
+        else:
+
+            print(
+                "  No viable candidate."
+            )
+
+    if not all_candidates:
+
+        print(
+            "No coarse candidates."
+        )
+
+        return None
+
+    # ========================================================
+    # PHASE 2
+    # ========================================================
+
+    print()
+    print(
+        "PHASE 2: FINE SEARCH"
+    )
+
+    # Only refine the best few coarse candidates.
+    #
+    # This is the major speed improvement over V9.
+    # ========================================================
+
+    coarse_best = {}
+
+    for candidate in all_candidates:
+
+        name = candidate[
+            "signal"
+        ]
+
+        if (
+            name not in coarse_best
+            or candidate["score"]
+            > coarse_best[name][
+                "score"
+            ]
+        ):
+
+            coarse_best[name] = (
+                candidate
+            )
+
+    refined = []
+
+    for signal_name, signal_function in (
+        SIGNALS.items()
+    ):
+
+        if signal_name not in coarse_best:
+            continue
+
+        print(
+            f"{signal_name}: "
+            "fine search"
+        )
+
+        candidates = search_signal(
+            d,
+            timestamps,
+            signal_name,
+            signal_function,
+            train_start,
+            train_end,
+            fine=True,
+        )
+
+        refined.extend(
+            candidates
+        )
+
+        if candidates:
+
+            best = candidates[0]
+            m = best["metrics"]
+
+            print(
+                f"  Fine best: "
+                f"{m['trades']} trades | "
+                f"{m['win_rate']:.2f}% WR | "
+                f"{m['total_r']:.2f}R"
+            )
+
+    if not refined:
+
+        print(
+            "No refined candidates."
+        )
+
+        return None
+
+    # ========================================================
+    # PHASE 3
+    # ========================================================
+
+    print()
+    print(
+        "PHASE 3: ENSEMBLE SELECTION"
+    )
 
     ensemble = build_ensemble(
         d,
         timestamps,
-        candidates,
+        refined,
         train_start,
         train_end,
     )
 
     if ensemble is None:
+
         print(
             "No valid ensemble."
         )
+
         return None
+
+    # ========================================================
+    # PHASE 4 — OOS
+    # ========================================================
 
     print()
     print(
-        "COMPLETELY OUT-OF-SAMPLE TEST"
+        "PHASE 4: COMPLETELY "
+        "OUT-OF-SAMPLE TEST"
     )
 
     print("-" * 60)
@@ -1937,9 +2142,11 @@ def run_period(
     )
 
     if oos is None:
+
         print(
             "No OOS trades."
         )
+
         return None
 
     print(
@@ -1987,7 +2194,14 @@ def run_period(
         f"{oos['trades_per_week']:.2f}"
     )
 
-    rows.append(
+    signal_names = "|".join(
+        x["signal"]
+        for x in ensemble[
+            "signals"
+        ]
+    )
+
+    output_rows.append(
         {
             "market":
                 market,
@@ -1996,12 +2210,10 @@ def run_period(
                 period_name,
 
             "signals":
-                "|".join(
-                    x["signal"]
-                    for x in ensemble[
-                        "signals"
-                    ]
-                ),
+                signal_names,
+
+            "rr":
+                ensemble["rr"],
 
             "oos_trades":
                 oos["trades"],
@@ -2052,8 +2264,8 @@ def run_market(
     print("=" * 60)
 
     print(
-        f"{market} V9 MULTI-SIGNAL "
-        "ENSEMBLE"
+        f"{market} V9.1 "
+        "MULTI-SIGNAL ENSEMBLE"
     )
 
     print("=" * 60)
@@ -2085,7 +2297,7 @@ def run_market(
         df
     )
 
-    rows = []
+    output_rows = []
 
     for period in PERIODS:
 
@@ -2096,12 +2308,16 @@ def run_market(
                 d,
                 timestamps,
                 period,
-                rows,
+                output_rows,
             )
 
         except Exception as error:
 
             print()
+            print(
+                "=" * 60
+            )
+
             print(
                 f"{market} PERIOD FAILED"
             )
@@ -2111,18 +2327,22 @@ def run_market(
                 f"{error}"
             )
 
+            print(
+                "=" * 60
+            )
+
     result = pd.DataFrame(
-        rows
+        output_rows
     )
 
-    path_out = (
-        f"data/"
+    output_path = (
+        "data/"
         f"{market.lower()}_"
-        f"optimizer_v9_results.csv"
+        "optimizer_v9_1_results.csv"
     )
 
     result.to_csv(
-        path_out,
+        output_path,
         index=False,
     )
 
@@ -2133,43 +2353,52 @@ def run_market(
 # SUMMARY
 # ============================================================
 
-def summarize(
+def make_summary(
     market,
-    df,
+    result,
 ):
 
-    if df.empty:
+    if result.empty:
         return None
 
     trades = int(
-        df[
+        result[
             "oos_trades"
         ].sum()
     )
 
     wins = int(
-        df[
+        result[
             "oos_wins"
         ].sum()
     )
 
     total_r = float(
-        df[
+        result[
             "oos_total_r"
         ].sum()
     )
 
     profitable_periods = int(
         (
-            df[
+            result[
                 "oos_total_r"
             ]
             > 0
         ).sum()
     )
 
+    stable_periods = int(
+        (
+            result[
+                "oos_win_rate"
+            ]
+            >= 55
+        ).sum()
+    )
+
     periods = len(
-        df
+        result
     )
 
     win_rate = (
@@ -2180,10 +2409,23 @@ def summarize(
         else 0
     )
 
+    average_frequency = float(
+        result[
+            "oos_trades_per_week"
+        ].mean()
+    )
+
+    average_dd = float(
+        result[
+            "oos_drawdown"
+        ].mean()
+    )
+
     if (
         trades >= 200
         and win_rate >= 82
         and total_r > 0
+        and profitable_periods >= 2
     ):
 
         verdict = (
@@ -2239,6 +2481,22 @@ def summarize(
             f"{profitable_periods}/"
             f"{periods}",
 
+        "stable_periods":
+            f"{stable_periods}/"
+            f"{periods}",
+
+        "avg_trades_per_week":
+            round(
+                average_frequency,
+                3,
+            ),
+
+        "avg_drawdown":
+            round(
+                average_dd,
+                2,
+            ),
+
         "verdict":
             verdict,
     }
@@ -2254,7 +2512,7 @@ def main():
 
     print(
         "MULTI-MARKET STRATEGY "
-        "OPTIMIZER V9"
+        "OPTIMIZER V9.1"
     )
 
     print("=" * 60)
@@ -2264,23 +2522,15 @@ def main():
     )
 
     print(
-        "TREND PULLBACK: ENABLED"
+        "TWO-STAGE SEARCH: ENABLED"
     )
 
     print(
-        "TREND MOMENTUM: ENABLED"
+        "COARSE SEARCH: ENABLED"
     )
 
     print(
-        "VOLATILITY EXPANSION: ENABLED"
-    )
-
-    print(
-        "REJECTION / REVERSAL: ENABLED"
-    )
-
-    print(
-        "EMA STRUCTURE: ENABLED"
+        "FINE SEARCH: ENABLED"
     )
 
     print(
@@ -2289,6 +2539,10 @@ def main():
 
     print(
         "CURRENT-ERA DATA: ENABLED"
+    )
+
+    print(
+        "OOS VALIDATION: ENABLED"
     )
 
     print(
@@ -2332,18 +2586,23 @@ def main():
                 market
             ] = pd.DataFrame()
 
+    # ========================================================
+    # MARKET SUMMARY
+    # ========================================================
+
     summaries = []
 
     for market, result in (
         results.items()
     ):
 
-        summary = summarize(
+        summary = make_summary(
             market,
             result,
         )
 
         if summary is not None:
+
             summaries.append(
                 summary
             )
@@ -2356,7 +2615,8 @@ def main():
     print("=" * 60)
 
     print(
-        "V9 FINAL MULTI-MARKET SUMMARY"
+        "V9.1 FINAL MULTI-MARKET "
+        "SUMMARY"
     )
 
     print("=" * 60)
@@ -2375,15 +2635,20 @@ def main():
             )
         )
 
-    # --------------------------------------------------------
-    # Combined OOS
-    # --------------------------------------------------------
+    # ========================================================
+    # COMBINED OOS
+    # ========================================================
 
     total_trades = 0
     total_wins = 0
     total_r = 0.0
 
-    for result in results.values():
+    profitable_periods = 0
+    total_periods = 0
+
+    for result in (
+        results.values()
+    ):
 
         if result.empty:
             continue
@@ -2406,22 +2671,6 @@ def main():
             ].sum()
         )
 
-    combined_wr = (
-        total_wins
-        / total_trades
-        * 100
-        if total_trades
-        else 0
-    )
-
-    profitable_periods = 0
-    total_periods = 0
-
-    for result in results.values():
-
-        if result.empty:
-            continue
-
         profitable_periods += int(
             (
                 result[
@@ -2434,6 +2683,14 @@ def main():
         total_periods += len(
             result
         )
+
+    combined_wr = (
+        total_wins
+        / total_trades
+        * 100
+        if total_trades
+        else 0
+    )
 
     print()
     print("=" * 60)
@@ -2471,11 +2728,15 @@ def main():
         f"{total_periods}"
     )
 
+    # ========================================================
+    # TARGET
+    # ========================================================
+
     print()
     print("=" * 60)
 
     print(
-        "V9 TARGET CHECK"
+        "V9.1 TARGET CHECK"
     )
 
     print("=" * 60)
@@ -2506,7 +2767,8 @@ def main():
     ):
 
         print(
-            "TARGET STATUS: ACHIEVED"
+            "TARGET STATUS: "
+            "ACHIEVED"
         )
 
     elif (
@@ -2538,6 +2800,10 @@ def main():
             "NOT ACHIEVED YET"
         )
 
+    # ========================================================
+    # SAFETY
+    # ========================================================
+
     print()
     print(
         "IMPORTANT:"
@@ -2545,7 +2811,16 @@ def main():
 
     print(
         "OOS data is never used "
-        "to optimise the signal."
+        "for optimisation."
+    )
+
+    print(
+        "Training and OOS periods "
+        "remain separated."
+    )
+
+    print(
+        "This is research only."
     )
 
     print(
@@ -2553,9 +2828,13 @@ def main():
         "from this optimizer alone."
     )
 
+    # ========================================================
+    # SAVE
+    # ========================================================
+
     summary_path = (
         "data/"
-        "multi_market_optimizer_v9_summary.csv"
+        "multi_market_optimizer_v9_1_summary.csv"
     )
 
     summary_df.to_csv(
@@ -2570,24 +2849,24 @@ def main():
 
     print(
         "data/"
-        "xauusd_optimizer_v9_results.csv"
+        "xauusd_optimizer_v9_1_results.csv"
     )
 
     print(
         "data/"
-        "eurusd_optimizer_v9_results.csv"
+        "eurusd_optimizer_v9_1_results.csv"
     )
 
     print(
         "data/"
-        "multi_market_optimizer_v9_summary.csv"
+        "multi_market_optimizer_v9_1_summary.csv"
     )
 
     print()
     print("=" * 60)
 
     print(
-        "OPTIMIZER V9 COMPLETE"
+        "OPTIMIZER V9.1 COMPLETE"
     )
 
     print("=" * 60)
