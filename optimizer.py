@@ -28,8 +28,8 @@ warnings.filterwarnings("ignore")
 DATA_DIR = "data"
 
 MARKETS = {
-    "XAUUSD": "data/xauusd.csv",
-    "EURUSD": "data/eurusd.csv",
+    "XAUUSD": "data/XAUUSD_15m.csv",
+    "EURUSD": "data/EURUSD_15m.csv",
 }
 
 RESULT_FILES = {
