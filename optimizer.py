@@ -1,31 +1,24 @@
 # ============================================================
-# MULTI-MARKET STRATEGY OPTIMIZER V11.2
+# MULTI-MARKET STRATEGY OPTIMIZER V11.3
 # ============================================================
 #
-# FAST REGIME-AWARE REJECTION / REVERSAL OPTIMIZER
+# FAST COARSE -> FINE SEARCH
+# REGIME-AWARE
+# REJECTION / REVERSAL
+# WALK-FORWARD
+# PARAMETER STABILITY
+# STRICT FINAL HOLDOUT
 #
-# FEATURES
-# ------------------------------------------------------------
-# - XAUUSD + EURUSD
-# - Regime classification
-# - Rejection / reversal signal
-# - Walk-forward testing
-# - Parameter stability
-# - Current-era weighting
-# - Strict 2026 holdout
-# - Minimum sample requirements
-# - Fast vectorised backtesting
-# - No live trading
-#
-# TARGET
-# ------------------------------------------------------------
+# TARGET:
 # ~82% WIN RATE
 # 200+ GENUINELY OUT-OF-SAMPLE TRADES
 # POSITIVE TOTAL R
 #
+# NO LIVE TRADING
 # ============================================================
 
 import os
+import sys
 import itertools
 import warnings
 
@@ -33,6 +26,18 @@ import numpy as np
 import pandas as pd
 
 warnings.filterwarnings("ignore")
+
+print("=" * 60, flush=True)
+print("MULTI-MARKET STRATEGY OPTIMIZER V11.3", flush=True)
+print("=" * 60, flush=True)
+print("FAST COARSE -> FINE SEARCH: ENABLED", flush=True)
+print("REGIME FILTERING: ENABLED", flush=True)
+print("REJECTION / REVERSAL: ENABLED", flush=True)
+print("WALK-FORWARD TESTING: ENABLED", flush=True)
+print("PARAMETER STABILITY: ENABLED", flush=True)
+print("STRICT FINAL HOLDOUT: ENABLED", flush=True)
+print("NO LIVE TRADING", flush=True)
+print("=" * 60, flush=True)
 
 
 # ============================================================
@@ -45,21 +50,20 @@ MARKETS = {
 }
 
 RESULT_FILES = {
-    "XAUUSD": "data/xauusd_optimizer_v11_2_results.csv",
-    "EURUSD": "data/eurusd_optimizer_v11_2_results.csv",
+    "XAUUSD": "data/xauusd_optimizer_v11_3_results.csv",
+    "EURUSD": "data/eurusd_optimizer_v11_3_results.csv",
 }
 
 SUMMARY_FILE = (
-    "data/multi_market_optimizer_v11_2_summary.csv"
+    "data/multi_market_optimizer_v11_3_summary.csv"
 )
 
 
 # ============================================================
-# WALK-FORWARD WINDOWS
+# WALK FORWARD
 # ============================================================
 
 WALK_FORWARD_PERIODS = [
-
     (
         "2021-2023 -> 2024",
         "2021-01-01",
@@ -67,7 +71,6 @@ WALK_FORWARD_PERIODS = [
         "2024-01-01",
         "2024-12-31",
     ),
-
     (
         "2022-2024 -> 2025",
         "2022-01-01",
@@ -75,41 +78,81 @@ WALK_FORWARD_PERIODS = [
         "2025-01-01",
         "2025-12-31",
     ),
+    (
+        "2023-2025 -> 2026",
+        "2023-01-01",
+        "2025-12-31",
+        "2026-01-01",
+        "2026-12-31",
+    ),
 ]
 
 
 # ============================================================
-# FINAL HOLDOUT
-# ============================================================
-
-FINAL_TRAIN_START = "2023-01-01"
-FINAL_TRAIN_END = "2025-12-31"
-
-FINAL_HOLDOUT_START = "2026-01-01"
-
-
-# ============================================================
-# SAMPLE REQUIREMENTS
+# MINIMUM SAMPLE REQUIREMENTS
 # ============================================================
 
 MIN_TRAIN_TRADES = 40
-MIN_STABILITY_TRADES = 25
-MIN_STABILITY_NEIGHBOURS = 10
-MIN_OOS_TRADES = 20
+MIN_FINE_TRADES = 40
+MIN_STABILITY_TRADES = 30
+MIN_OOS_TRADES = 10
 
 
 # ============================================================
-# PARAMETERS
+# COARSE SEARCH
 # ============================================================
 
-RR_VALUES = [
+COARSE_RR = [
     0.50,
-    0.60,
     0.75,
     1.00,
 ]
 
-WICK_VALUES = [
+COARSE_WICK = [
+    0.20,
+    0.30,
+    0.35,
+]
+
+COARSE_BODY = [
+    0.20,
+    0.25,
+    0.30,
+]
+
+COARSE_SEPARATION = [
+    10,
+    20,
+    40,
+]
+
+COARSE_HOURS = [
+    (3, 4, 5),
+    (4, 5),
+    (3, 4, 5, 12, 13),
+]
+
+COARSE_THRESHOLD = [
+    -0.25,
+    0.00,
+    0.25,
+]
+
+
+# ============================================================
+# FINE SEARCH
+# ============================================================
+
+FINE_RR = [
+    0.40,
+    0.50,
+    0.60,
+    0.75,
+    0.90,
+    1.00,
+]
+
+FINE_WICK = [
     0.15,
     0.20,
     0.25,
@@ -117,34 +160,22 @@ WICK_VALUES = [
     0.35,
 ]
 
-BODY_VALUES = [
+FINE_BODY = [
     0.20,
     0.25,
     0.30,
     0.35,
 ]
 
-SEPARATION_VALUES = [
-    0.0003,
-    0.0005,
-    0.0008,
-    0.0010,
-]
-
-MAX_CROSS_VALUES = [
+FINE_SEPARATION = [
     10,
+    15,
     20,
+    30,
     40,
 ]
 
-HOUR_SETS = [
-    (3, 4, 5),
-    (4, 5),
-    (3, 4, 5, 12, 13),
-    (12, 13),
-]
-
-THRESHOLDS = [
+FINE_THRESHOLD = [
     -0.50,
     -0.25,
     0.00,
@@ -154,12 +185,18 @@ THRESHOLDS = [
 
 
 # ============================================================
-# DATA LOADER
+# DATA
 # ============================================================
 
 def load_data(path):
 
+    print(
+        f"Loading {path}...",
+        flush=True,
+    )
+
     if not os.path.exists(path):
+
         raise RuntimeError(
             f"DATA FILE NOT FOUND: {path}"
         )
@@ -167,12 +204,13 @@ def load_data(path):
     df = pd.read_csv(path)
 
     if df.empty:
+
         raise RuntimeError(
-            f"DATA FILE IS EMPTY: {path}"
+            f"DATA FILE EMPTY: {path}"
         )
 
     # --------------------------------------------------------
-    # Normalise column names
+    # Normalise names
     # --------------------------------------------------------
 
     rename = {}
@@ -190,50 +228,48 @@ def load_data(path):
 
         rename[col] = clean
 
-    df = df.rename(columns=rename)
+    df = df.rename(
+        columns=rename
+    )
 
     # --------------------------------------------------------
-    # Timestamp detection
+    # Timestamp
     # --------------------------------------------------------
 
-    timestamp_candidates = [
+    candidates = [
         "time",
         "datetime",
         "date",
         "timestamp",
         "timestamp_utc",
         "datetime_utc",
-        "gmt_time",
         "utc_time",
+        "gmt_time",
         "date_time",
     ]
 
     time_col = None
 
-    for candidate in timestamp_candidates:
+    for candidate in candidates:
 
         if candidate in df.columns:
+
             time_col = candidate
             break
 
-    # --------------------------------------------------------
-    # Automatic timestamp detection
-    # --------------------------------------------------------
-
     if time_col is None:
-
-        excluded = {
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-            "vol",
-        }
 
         for col in df.columns:
 
-            if col in excluded:
+            if col in {
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "vol",
+            }:
+
                 continue
 
             try:
@@ -250,13 +286,14 @@ def load_data(path):
                     break
 
             except Exception:
-                continue
+
+                pass
 
     if time_col is None:
 
         raise RuntimeError(
-            "Could not identify timestamp column.\n"
-            f"Columns found: {list(df.columns)}"
+            "Could not find datetime column.\n"
+            f"Columns: {list(df.columns)}"
         )
 
     df["time"] = pd.to_datetime(
@@ -266,7 +303,7 @@ def load_data(path):
     )
 
     # --------------------------------------------------------
-    # OHLC aliases
+    # OHLC
     # --------------------------------------------------------
 
     aliases = {
@@ -276,7 +313,7 @@ def load_data(path):
         "close": ["close", "c", "close_price"],
     }
 
-    ohlc_rename = {}
+    ohlc = {}
 
     for target, options in aliases.items():
 
@@ -284,11 +321,11 @@ def load_data(path):
 
             if option in df.columns:
 
-                ohlc_rename[option] = target
+                ohlc[option] = target
                 break
 
     df = df.rename(
-        columns=ohlc_rename
+        columns=ohlc
     )
 
     required = [
@@ -307,13 +344,8 @@ def load_data(path):
     if missing:
 
         raise RuntimeError(
-            f"{path} missing columns: {missing}\n"
-            f"Available columns: {list(df.columns)}"
+            f"{path} missing columns: {missing}"
         )
-
-    # --------------------------------------------------------
-    # Numeric conversion
-    # --------------------------------------------------------
 
     for col in [
         "open",
@@ -331,10 +363,6 @@ def load_data(path):
         subset=required
     )
 
-    # --------------------------------------------------------
-    # Clean OHLC
-    # --------------------------------------------------------
-
     df = df[
         (df["high"] >= df["low"]) &
         (df["high"] >= df["open"]) &
@@ -347,25 +375,21 @@ def load_data(path):
         df
         .sort_values("time")
         .drop_duplicates(
-            subset=["time"],
-            keep="first",
+            "time"
         )
         .reset_index(drop=True)
     )
 
-    if df.empty:
-        raise RuntimeError(
-            f"No valid candles remain in {path}"
-        )
-
     print(
-        f"Loaded candles: {len(df)}"
+        f"Candles: {len(df)}",
+        flush=True,
     )
 
     print(
         f"Range: "
         f"{df['time'].min()} -> "
-        f"{df['time'].max()}"
+        f"{df['time'].max()}",
+        flush=True,
     )
 
     return df
@@ -377,22 +401,23 @@ def load_data(path):
 
 def prepare_indicators(df):
 
-    df = df.copy()
-
-    close = df["close"]
-    open_ = df["open"]
-    high = df["high"]
-    low = df["low"]
-
-    candle_range = (
-        high - low
+    print(
+        "Preparing indicators...",
+        flush=True,
     )
 
-    body = (
-        close - open_
-    ).abs()
+    df = df.copy()
 
-    df["range"] = candle_range
+    o = df["open"]
+    h = df["high"]
+    l = df["low"]
+    c = df["close"]
+
+    candle_range = h - l
+
+    body = (
+        c - o
+    ).abs()
 
     df["body_ratio"] = np.where(
         candle_range > 0,
@@ -400,62 +425,52 @@ def prepare_indicators(df):
         np.nan,
     )
 
-    upper_wick = (
-        high -
-        np.maximum(open_, close)
-    )
-
-    lower_wick = (
-        np.minimum(open_, close) -
-        low
-    )
-
     df["upper_wick_ratio"] = np.where(
         candle_range > 0,
-        upper_wick / candle_range,
+        (
+            h -
+            np.maximum(o, c)
+        ) / candle_range,
         np.nan,
     )
 
     df["lower_wick_ratio"] = np.where(
         candle_range > 0,
-        lower_wick / candle_range,
+        (
+            np.minimum(o, c) -
+            l
+        ) / candle_range,
         np.nan,
     )
 
     # --------------------------------------------------------
-    # EMAs
+    # EMA
     # --------------------------------------------------------
 
-    ema20 = close.ewm(
+    ema20 = c.ewm(
         span=20,
         adjust=False,
     ).mean()
 
-    ema50 = close.ewm(
+    ema50 = c.ewm(
         span=50,
-        adjust=False,
-    ).mean()
-
-    ema100 = close.ewm(
-        span=100,
         adjust=False,
     ).mean()
 
     df["ema20"] = ema20
     df["ema50"] = ema50
-    df["ema100"] = ema100
 
     # --------------------------------------------------------
     # ATR
     # --------------------------------------------------------
 
-    prev_close = close.shift(1)
+    prev = c.shift(1)
 
     tr = pd.concat(
         [
-            high - low,
-            (high - prev_close).abs(),
-            (low - prev_close).abs(),
+            h - l,
+            (h - prev).abs(),
+            (l - prev).abs(),
         ],
         axis=1,
     ).max(axis=1)
@@ -481,18 +496,17 @@ def prepare_indicators(df):
     df["atr_ratio"] = atr_ratio
 
     # --------------------------------------------------------
-    # Trend strength
+    # Trend
     # --------------------------------------------------------
 
     ema_spread = (
         (ema20 - ema50).abs()
-        / close
+        / c
     )
 
     trend_strength = np.where(
-        np.asarray(atr_ratio) > 0,
-        ema_spread /
-        np.asarray(atr_ratio),
+        atr_ratio > 0,
+        ema_spread / atr_ratio,
         np.nan,
     )
 
@@ -505,42 +519,35 @@ def prepare_indicators(df):
     # --------------------------------------------------------
 
     df["momentum5"] = (
-        close /
-        close.shift(5)
+        c /
+        c.shift(5)
         - 1
     )
 
     # --------------------------------------------------------
-    # Rolling location
+    # Range position
     # --------------------------------------------------------
 
-    rolling_high = high.rolling(
+    rh = h.rolling(
         20,
         min_periods=20,
     ).max()
 
-    rolling_low = low.rolling(
+    rl = l.rolling(
         20,
         min_periods=20,
     ).min()
 
-    rolling_range = (
-        rolling_high -
-        rolling_low
-    )
+    rr = rh - rl
 
     df["range_position"] = np.where(
-        rolling_range > 0,
-        (
-            close -
-            rolling_low
-        ) /
-        rolling_range,
+        rr > 0,
+        (c - rl) / rr,
         np.nan,
     )
 
     # --------------------------------------------------------
-    # Hour
+    # Time
     # --------------------------------------------------------
 
     df["hour"] = (
@@ -553,10 +560,12 @@ def prepare_indicators(df):
 
     trend = (
         df["trend_strength"]
+        .to_numpy()
     )
 
-    volatility = (
+    vol = (
         df["atr_ratio"]
+        .to_numpy()
     )
 
     regime = np.full(
@@ -567,34 +576,34 @@ def prepare_indicators(df):
 
     valid = (
         np.isfinite(trend) &
-        np.isfinite(volatility)
+        np.isfinite(vol)
     )
 
     regime[
         valid &
         (trend >= 2.0) &
-        (volatility >= 1.10)
+        (vol >= 1.10)
     ] = "TREND_HIGH_VOL"
 
     regime[
         valid &
         (trend >= 2.0) &
-        (volatility < 1.10)
+        (vol < 1.10)
     ] = "TREND_LOW_VOL"
 
     regime[
         valid &
         (trend < 1.0) &
-        (volatility >= 1.10)
+        (vol >= 1.10)
     ] = "RANGE_HIGH_VOL"
 
     regime[
         valid &
         (trend < 1.0) &
-        (volatility < 1.10)
+        (vol < 1.10)
     ] = "RANGE_LOW_VOL"
 
-    middle = (
+    transition = (
         valid &
         ~np.isin(
             regime,
@@ -607,115 +616,23 @@ def prepare_indicators(df):
         )
     )
 
-    regime[middle] = "TRANSITION"
+    regime[transition] = "TRANSITION"
 
     df["regime"] = regime
+
+    print(
+        "Indicators ready.",
+        flush=True,
+    )
 
     return df
 
 
 # ============================================================
-# PRECOMPUTE FUTURE EXCURSIONS
+# FAST SIGNAL SCORE
 # ============================================================
 
-def prepare_backtest_arrays(df):
-
-    high = (
-        df["high"]
-        .to_numpy(dtype=float)
-    )
-
-    low = (
-        df["low"]
-        .to_numpy(dtype=float)
-    )
-
-    close = (
-        df["close"]
-        .to_numpy(dtype=float)
-    )
-
-    open_ = (
-        df["open"]
-        .to_numpy(dtype=float)
-    )
-
-    atr = (
-        df["atr14"]
-        .to_numpy(dtype=float)
-    )
-
-    # --------------------------------------------------------
-    # Future maximum/minimum over the next 96 candles.
-    #
-    # These are calculated ONCE.
-    #
-    # 96 x 15 minutes = 24 hours.
-    # --------------------------------------------------------
-
-    future_high = np.full(
-        len(df),
-        np.nan,
-    )
-
-    future_low = np.full(
-        len(df),
-        np.nan,
-    )
-
-    for shift in range(1, 97):
-
-        shifted_high = np.full(
-            len(df),
-            np.nan,
-        )
-
-        shifted_low = np.full(
-            len(df),
-            np.nan,
-        )
-
-        shifted_high[:-shift] = (
-            high[shift:]
-        )
-
-        shifted_low[:-shift] = (
-            low[shift:]
-        )
-
-        if shift == 1:
-
-            future_high = shifted_high
-            future_low = shifted_low
-
-        else:
-
-            future_high = np.fmax(
-                future_high,
-                shifted_high,
-            )
-
-            future_low = np.fmin(
-                future_low,
-                shifted_low,
-            )
-
-    return {
-        "high": high,
-        "low": low,
-        "close": close,
-        "open": open_,
-        "atr": atr,
-        "future_high": future_high,
-        "future_low": future_low,
-    }
-
-
-# ============================================================
-# SIGNAL SCORE
-# ============================================================
-
-def calculate_scores(
+def calculate_score(
     df,
     wick,
     body,
@@ -746,7 +663,7 @@ def calculate_scores(
         .to_numpy()
     )
 
-    location = (
+    position = (
         df["range_position"]
         .to_numpy()
     )
@@ -758,21 +675,24 @@ def calculate_scores(
 
     score = np.zeros(
         len(df),
-        dtype=float,
+        dtype=np.float32,
     )
 
+    # Lower wick rejection
     score += np.where(
         lower >= wick,
         0.75,
         0.0,
     )
 
+    # Upper wick rejection
     score -= np.where(
         upper >= wick,
         0.75,
         0.0,
     )
 
+    # Small body
     score += np.where(
         body_ratio <= body,
         0.25,
@@ -799,9 +719,10 @@ def calculate_scores(
         0.0,
     )
 
+    # Location reversal
     score += np.where(
         (
-            location <= 0.30
+            position <= 0.30
         ) &
         bullish,
         0.50,
@@ -810,13 +731,14 @@ def calculate_scores(
 
     score -= np.where(
         (
-            location >= 0.70
+            position >= 0.70
         ) &
         bearish,
         0.50,
         0.0,
     )
 
+    # Momentum
     score += np.where(
         bullish &
         (momentum > 0),
@@ -839,21 +761,52 @@ def calculate_scores(
 
 
 # ============================================================
-# FAST TRADE BACKTEST
+# FAST EXACTISH TRADE ENGINE
 # ============================================================
 
-def backtest_candidate(
+def backtest(
     df,
-    arrays,
     score,
     rr,
-    separation,
     max_cross,
     hours,
     threshold,
 ):
 
-    time = df["time"]
+    high = (
+        df["high"]
+        .to_numpy(
+            dtype=np.float64
+        )
+    )
+
+    low = (
+        df["low"]
+        .to_numpy(
+            dtype=np.float64
+        )
+    )
+
+    close = (
+        df["close"]
+        .to_numpy(
+            dtype=np.float64
+        )
+    )
+
+    open_ = (
+        df["open"]
+        .to_numpy(
+            dtype=np.float64
+        )
+    )
+
+    atr = (
+        df["atr14"]
+        .to_numpy(
+            dtype=np.float64
+        )
+    )
 
     hour = (
         df["hour"]
@@ -865,20 +818,8 @@ def backtest_candidate(
         .to_numpy()
     )
 
-    close = arrays["close"]
-    open_ = arrays["open"]
-    atr = arrays["atr"]
-
-    future_high = (
-        arrays["future_high"]
-    )
-
-    future_low = (
-        arrays["future_low"]
-    )
-
     # --------------------------------------------------------
-    # Valid regime.
+    # Valid regimes
     # --------------------------------------------------------
 
     valid_regime = np.isin(
@@ -892,13 +833,16 @@ def backtest_candidate(
     )
 
     # --------------------------------------------------------
-    # Signal mask.
+    # Signal mask
     # --------------------------------------------------------
 
     mask = (
         np.isfinite(score) &
         (score >= threshold) &
-        np.isin(hour, hours) &
+        np.isin(
+            hour,
+            hours,
+        ) &
         valid_regime &
         np.isfinite(atr) &
         (atr > 0)
@@ -908,7 +852,14 @@ def backtest_candidate(
         mask
     )
 
-    # Need next candle for entry.
+    if len(indices) == 0:
+
+        return np.empty(
+            0,
+            dtype=np.float64,
+        )
+
+    # Need a following candle.
     indices = indices[
         indices < len(df) - 1
     ]
@@ -917,24 +868,21 @@ def backtest_candidate(
 
         return np.empty(
             0,
-            dtype=float,
+            dtype=np.float64,
         )
 
     # --------------------------------------------------------
-    # Enforce minimum signal separation.
-    #
-    # This is much faster than scanning every candle.
+    # Signal separation
     # --------------------------------------------------------
 
     selected = []
 
-    last_index = -10_000
+    last = -10_000
 
     for idx in indices:
 
         if (
-            idx -
-            last_index
+            idx - last
             >= max_cross
         ):
 
@@ -942,189 +890,201 @@ def backtest_candidate(
                 idx
             )
 
-            last_index = idx
+            last = idx
 
     if not selected:
 
         return np.empty(
             0,
-            dtype=float,
+            dtype=np.float64,
         )
 
-    idx = np.asarray(
+    selected = np.asarray(
         selected,
         dtype=int,
     )
 
-    entry_idx = idx + 1
-
-    entry = (
-        open_[entry_idx]
+    entry_indices = (
+        selected + 1
     )
 
-    risk = (
-        atr[idx]
+    entries = (
+        open_[entry_indices]
+    )
+
+    risks = (
+        atr[selected]
     )
 
     bullish = (
-        close[idx] >
-        open_[idx]
-    )
-
-    bearish = (
-        close[idx] <
-        open_[idx]
+        close[selected]
+        >
+        open_[selected]
     )
 
     # --------------------------------------------------------
-    # Long setup
+    # We only need to inspect the next 48 candles.
+    #
+    # This is the maximum holding period.
     # --------------------------------------------------------
 
-    long_mask = (
-        bullish
-    )
+    max_hold = 48
 
-    long_entry = entry[
-        long_mask
-    ]
-
-    long_risk = risk[
-        long_mask
-    ]
-
-    long_target = (
-        long_entry +
-        long_risk * rr
-    )
-
-    long_stop = (
-        long_entry -
-        long_risk
-    )
-
-    long_future_high = (
-        future_high[
-            entry_idx[
-                long_mask
-            ]
-            - 1
-        ]
-    )
-
-    long_future_low = (
-        future_low[
-            entry_idx[
-                long_mask
-            ]
-            - 1
-        ]
-    )
-
-    long_target_hit = (
-        long_future_high
-        >= long_target
-    )
-
-    long_stop_hit = (
-        long_future_low
-        <= long_stop
-    )
-
-    long_results = np.where(
-        long_target_hit &
-        ~long_stop_hit,
-        rr,
-        np.where(
-            long_stop_hit,
-            -1.0,
-            np.nan,
-        ),
-    )
+    results = []
 
     # --------------------------------------------------------
-    # Short setup
+    # IMPORTANT:
+    #
+    # We loop only over actual signals, NOT every candle.
     # --------------------------------------------------------
 
-    short_mask = (
-        bearish
-    )
+    for n, signal_idx in enumerate(
+        selected
+    ):
 
-    short_entry = entry[
-        short_mask
-    ]
+        entry_idx = (
+            signal_idx + 1
+        )
 
-    short_risk = risk[
-        short_mask
-    ]
+        if entry_idx >= len(df):
+            continue
 
-    short_target = (
-        short_entry -
-        short_risk * rr
-    )
+        entry = (
+            entries[n]
+        )
 
-    short_stop = (
-        short_entry +
-        short_risk
-    )
+        risk = (
+            risks[n]
+        )
 
-    short_future_low = (
-        future_low[
-            entry_idx[
-                short_mask
+        if not np.isfinite(risk):
+            continue
+
+        if risk <= 0:
+            continue
+
+        direction = (
+            1
+            if bullish[n]
+            else -1
+        )
+
+        if direction == 1:
+
+            stop = (
+                entry -
+                risk
+            )
+
+            target = (
+                entry +
+                risk * rr
+            )
+
+        else:
+
+            stop = (
+                entry +
+                risk
+            )
+
+            target = (
+                entry -
+                risk * rr
+            )
+
+        end = min(
+            entry_idx +
+            max_hold,
+            len(df),
+        )
+
+        candle_high = (
+            high[
+                entry_idx:end
             ]
-            - 1
-        ]
-    )
+        )
 
-    short_future_high = (
-        future_high[
-            entry_idx[
-                short_mask
+        candle_low = (
+            low[
+                entry_idx:end
             ]
-            - 1
-        ]
-    )
+        )
 
-    short_target_hit = (
-        short_future_low
-        <= short_target
-    )
+        if direction == 1:
 
-    short_stop_hit = (
-        short_future_high
-        >= short_stop
-    )
+            target_hit = (
+                candle_high
+                >= target
+            )
 
-    short_results = np.where(
-        short_target_hit &
-        ~short_stop_hit,
-        rr,
-        np.where(
-            short_stop_hit,
-            -1.0,
-            np.nan,
-        ),
-    )
+            stop_hit = (
+                candle_low
+                <= stop
+            )
 
-    results = np.concatenate(
-        [
-            long_results,
-            short_results,
-        ]
-    )
+        else:
 
-    return results[
-        np.isfinite(results)
-    ]
+            target_hit = (
+                candle_low
+                <= target
+            )
+
+            stop_hit = (
+                candle_high
+                >= stop
+            )
+
+        target_positions = np.flatnonzero(
+            target_hit
+        )
+
+        stop_positions = np.flatnonzero(
+            stop_hit
+        )
+
+        first_target = (
+            target_positions[0]
+            if len(target_positions)
+            else 10_000
+        )
+
+        first_stop = (
+            stop_positions[0]
+            if len(stop_positions)
+            else 10_000
+        )
+
+        # ----------------------------------------------------
+        # Conservative assumption:
+        # if both occur on same candle, SL wins.
+        # ----------------------------------------------------
+
+        if first_stop <= first_target:
+
+            if first_stop != 10_000:
+
+                results.append(
+                    -1.0
+                )
+
+        elif first_target != 10_000:
+
+            results.append(
+                float(rr)
+            )
+
+    return np.asarray(
+        results,
+        dtype=np.float64,
+    )
 
 
 # ============================================================
 # PERFORMANCE
 # ============================================================
 
-def performance(
-    results
-):
+def performance(results):
 
     if (
         results is None
@@ -1159,16 +1119,16 @@ def performance(
         results
     )
 
-    win_count = int(
+    wins_count = int(
         wins.sum()
     )
 
-    loss_count = int(
+    losses_count = int(
         losses.sum()
     )
 
     win_rate = (
-        win_count /
+        wins_count /
         trades *
         100
     )
@@ -1183,16 +1143,12 @@ def performance(
         )
     )
 
-    if gross_loss > 0:
-
-        pf = (
-            gross_profit /
-            gross_loss
-        )
-
-    else:
-
-        pf = 999.0
+    pf = (
+        gross_profit /
+        gross_loss
+        if gross_loss > 0
+        else 999.0
+    )
 
     equity = np.cumsum(
         results
@@ -1203,8 +1159,7 @@ def performance(
     )
 
     drawdown = (
-        peak -
-        equity
+        peak - equity
     )
 
     max_dd = float(
@@ -1234,10 +1189,10 @@ def performance(
             trades,
 
         "wins":
-            win_count,
+            wins_count,
 
         "losses":
-            loss_count,
+            losses_count,
 
         "win_rate":
             win_rate,
@@ -1259,122 +1214,115 @@ def performance(
 
 
 # ============================================================
-# CANDIDATE GENERATION
+# SCORE CANDIDATE
 # ============================================================
 
-def optimise_training(
+def candidate_quality(p):
+
+    if p["trades"] < MIN_TRAIN_TRADES:
+        return -999999
+
+    if p["total_r"] <= 0:
+        return -999999
+
+    wr = min(
+        p["win_rate"],
+        100,
+    )
+
+    pf = min(
+        p["profit_factor"],
+        4,
+    )
+
+    total_r = min(
+        max(
+            p["total_r"],
+            0,
+        ),
+        30,
+    )
+
+    sample = min(
+        p["trades"],
+        200,
+    )
+
+    dd = min(
+        p["max_drawdown"],
+        10,
+    )
+
+    return (
+        wr * 0.50
+        +
+        (pf / 4 * 100) * 0.15
+        +
+        (total_r / 30 * 100) * 0.15
+        +
+        (sample / 200 * 100) * 0.20
+        -
+        (dd / 10 * 10)
+    )
+
+
+# ============================================================
+# FAST COARSE SEARCH
+# ============================================================
+
+def coarse_search(
     df,
-    arrays,
-    train_start,
-    train_end,
 ):
 
-    dates = (
-        df["time"]
-    )
-
-    train_mask = (
-        (dates >= train_start) &
-        (dates <= train_end)
-    )
-
-    train_df = (
-        df.loc[
-            train_mask
-        ]
-        .reset_index(drop=True)
-    )
-
-    # --------------------------------------------------------
-    # Recalculate arrays for training slice.
-    # --------------------------------------------------------
-
-    train_arrays = {
-        key: value[
-            train_mask.to_numpy()
-        ]
-        for key, value in arrays.items()
-    }
-
     print(
-        "PHASE 1: FAST SEARCH"
+        "PHASE 1: FAST COARSE SEARCH",
+        flush=True,
     )
 
     combinations = list(
         itertools.product(
-            RR_VALUES,
-            WICK_VALUES,
-            BODY_VALUES,
-            SEPARATION_VALUES,
-            MAX_CROSS_VALUES,
-            HOUR_SETS,
-            THRESHOLDS,
+            COARSE_RR,
+            COARSE_WICK,
+            COARSE_BODY,
+            COARSE_SEPARATION,
+            COARSE_HOURS,
+            COARSE_THRESHOLD,
         )
     )
 
-    total = len(
-        combinations
-    )
-
     print(
-        f"COMBINATIONS: {total}"
+        f"COARSE COMBINATIONS: "
+        f"{len(combinations)}",
+        flush=True,
     )
 
     candidates = []
 
-    # --------------------------------------------------------
-    # Cache scores.
-    #
-    # Wick/body combinations determine the signal score.
-    # Other parameters don't change the score.
-    # --------------------------------------------------------
-
     score_cache = {}
 
-    score_combinations = list(
-        itertools.product(
-            WICK_VALUES,
-            BODY_VALUES,
-        )
-    )
-
-    for wick, body in (
-        score_combinations
+    for wick, body in itertools.product(
+        COARSE_WICK,
+        COARSE_BODY,
     ):
 
         score_cache[
             (wick, body)
-        ] = calculate_scores(
-            train_df,
+        ] = calculate_score(
+            df,
             wick,
             body,
         )
 
-    for number, params in enumerate(
+    for i, params in enumerate(
         combinations,
         1,
     ):
-
-        if (
-            number == 1
-            or number % 500 == 0
-            or number == total
-        ):
-
-            print(
-                f"Progress: "
-                f"{number}/{total} "
-                f"("
-                f"{number / total * 100:.1f}"
-                f"%)"
-            )
 
         (
             rr,
             wick,
             body,
             separation,
-            max_cross,
             hours,
             threshold,
         ) = params
@@ -1383,85 +1331,32 @@ def optimise_training(
             (wick, body)
         ]
 
-        results = backtest_candidate(
-            train_df,
-            train_arrays,
+        results = backtest(
+            df,
             score,
             rr,
             separation,
-            max_cross,
             hours,
             threshold,
         )
-
-        if len(results) < MIN_TRAIN_TRADES:
-            continue
 
         p = performance(
             results
         )
 
-        if p["total_r"] <= 0:
-            continue
-
-        # ----------------------------------------------------
-        # Quality score.
-        # ----------------------------------------------------
-
-        wr_score = (
-            p["win_rate"]
+        quality = candidate_quality(
+            p
         )
 
-        r_score = min(
-            max(
-                p["total_r"],
-                0,
-            ),
-            30,
-        ) / 30 * 100
+        if quality > -999999:
 
-        pf_score = min(
-            p["profit_factor"],
-            4,
-        ) / 4 * 100
-
-        dd_penalty = min(
-            p["max_drawdown"],
-            10,
-        ) / 10 * 100
-
-        sample_score = min(
-            len(results),
-            150,
-        ) / 150 * 100
-
-        quality = (
-            wr_score * 0.40
-            +
-            r_score * 0.20
-            +
-            pf_score * 0.20
-            +
-            sample_score * 0.15
-            -
-            dd_penalty * 0.05
-        )
-
-        candidates.append(
-            {
-                "params": params,
-                "performance": p,
-                "quality": quality,
-            }
-        )
-
-    print(
-        f"VALID CANDIDATES: "
-        f"{len(candidates)}"
-    )
-
-    if not candidates:
-        return None
+            candidates.append(
+                {
+                    "params": params,
+                    "performance": p,
+                    "quality": quality,
+                }
+            )
 
     candidates.sort(
         key=lambda x:
@@ -1469,174 +1364,405 @@ def optimise_training(
         reverse=True,
     )
 
-    # ========================================================
-    # STABILITY TEST
-    # ========================================================
-
     print(
-        "PHASE 2: STABILITY TEST"
+        f"VALID COARSE CANDIDATES: "
+        f"{len(candidates)}",
+        flush=True,
     )
 
-    stable = []
+    return candidates[:12]
 
-    for candidate in candidates[:30]:
 
-        (
-            rr,
-            wick,
-            body,
-            separation,
-            max_cross,
-            hours,
-            threshold,
-        ) = candidate["params"]
+# ============================================================
+# FINE SEARCH
+# ============================================================
 
-        nearby = []
+def fine_search(
+    df,
+    coarse_candidates,
+):
 
-        for rr2 in RR_VALUES:
+    print(
+        "PHASE 2: FINE SEARCH",
+        flush=True,
+    )
 
+    candidates = []
+
+    for rank, coarse in enumerate(
+        coarse_candidates,
+        1,
+    ):
+
+        base = coarse[
+            "params"
+        ]
+
+        base_rr = base[0]
+        base_wick = base[1]
+        base_body = base[2]
+        base_sep = base[3]
+        base_hours = base[4]
+        base_threshold = base[5]
+
+        rr_values = [
+            x
+            for x in FINE_RR
             if abs(
-                rr2 - rr
-            ) > 0.25:
-                continue
+                x - base_rr
+            ) <= 0.30
+        ]
 
-            for wick2 in WICK_VALUES:
+        wick_values = [
+            x
+            for x in FINE_WICK
+            if abs(
+                x - base_wick
+            ) <= 0.10
+        ]
 
-                if abs(
-                    wick2 - wick
-                ) > 0.10:
-                    continue
+        body_values = [
+            x
+            for x in FINE_BODY
+            if abs(
+                x - base_body
+            ) <= 0.10
+        ]
 
-                for body2 in BODY_VALUES:
+        sep_values = [
+            x
+            for x in FINE_SEPARATION
+            if abs(
+                x - base_sep
+            ) <= 20
+        ]
 
-                    if abs(
-                        body2 - body
-                    ) > 0.10:
-                        continue
+        threshold_values = [
+            x
+            for x in FINE_THRESHOLD
+            if abs(
+                x - base_threshold
+            ) <= 0.50
+        ]
 
-                    score2 = calculate_scores(
-                        train_df,
-                        wick2,
-                        body2,
-                    )
+        hours_values = [
+            base_hours,
+        ]
 
-                    results2 = backtest_candidate(
-                        train_df,
-                        train_arrays,
-                        score2,
-                        rr2,
-                        separation,
-                        max_cross,
-                        hours,
-                        threshold,
-                    )
-
-                    if (
-                        len(results2)
-                        < MIN_STABILITY_TRADES
-                    ):
-                        continue
-
-                    p2 = performance(
-                        results2
-                    )
-
-                    nearby.append(
-                        p2
-                    )
-
-        if (
-            len(nearby)
-            < MIN_STABILITY_NEIGHBOURS
-        ):
-            continue
-
-        median_wr = float(
-            np.median(
-                [
-                    x["win_rate"]
-                    for x in nearby
-                ]
+        combos = list(
+            itertools.product(
+                rr_values,
+                wick_values,
+                body_values,
+                sep_values,
+                hours_values,
+                threshold_values,
             )
         )
 
-        median_r = float(
-            np.median(
-                [
-                    x["total_r"]
-                    for x in nearby
-                ]
-            )
+        print(
+            f"Fine region "
+            f"{rank}/"
+            f"{len(coarse_candidates)}: "
+            f"{len(combos)} combinations",
+            flush=True,
         )
 
-        positive_pct = float(
-            np.mean(
-                [
-                    x["total_r"] > 0
-                    for x in nearby
-                ]
-            ) * 100
+        score_cache = {}
+
+        for wick, body in itertools.product(
+            wick_values,
+            body_values,
+        ):
+
+            score_cache[
+                (wick, body)
+            ] = calculate_score(
+                df,
+                wick,
+                body,
+            )
+
+        for params in combos:
+
+            (
+                rr,
+                wick,
+                body,
+                separation,
+                hours,
+                threshold,
+            ) = params
+
+            score = score_cache[
+                (wick, body)
+            ]
+
+            results = backtest(
+                df,
+                score,
+                rr,
+                separation,
+                hours,
+                threshold,
+            )
+
+            p = performance(
+                results
+            )
+
+            quality = candidate_quality(
+                p
+            )
+
+            if quality > -999999:
+
+                candidates.append(
+                    {
+                        "params":
+                            params,
+
+                        "performance":
+                            p,
+
+                        "quality":
+                            quality,
+                    }
+                )
+
+    candidates.sort(
+        key=lambda x:
+        x["quality"],
+        reverse=True,
+    )
+
+    print(
+        f"VALID FINE CANDIDATES: "
+        f"{len(candidates)}",
+        flush=True,
+    )
+
+    return candidates[:20]
+
+
+# ============================================================
+# STABILITY
+# ============================================================
+
+def stability_test(
+    df,
+    candidate,
+):
+
+    (
+        rr,
+        wick,
+        body,
+        separation,
+        hours,
+        threshold,
+    ) = candidate[
+        "params"
+    ]
+
+    nearby_rr = [
+        x for x in FINE_RR
+        if abs(x - rr) <= 0.25
+    ]
+
+    nearby_wick = [
+        x for x in FINE_WICK
+        if abs(x - wick) <= 0.10
+    ]
+
+    nearby_body = [
+        x for x in FINE_BODY
+        if abs(x - body) <= 0.10
+    ]
+
+    nearby_threshold = [
+        x for x in FINE_THRESHOLD
+        if abs(x - threshold) <= 0.25
+    ]
+
+    nearby = []
+
+    for rr2, wick2, body2, threshold2 in itertools.product(
+        nearby_rr,
+        nearby_wick,
+        nearby_body,
+        nearby_threshold,
+    ):
+
+        score = calculate_score(
+            df,
+            wick2,
+            body2,
+        )
+
+        results = backtest(
+            df,
+            score,
+            rr2,
+            separation,
+            hours,
+            threshold2,
+        )
+
+        p = performance(
+            results
         )
 
         if (
-            median_r > 0
-            and positive_pct >= 60
+            p["trades"]
+            >= MIN_STABILITY_TRADES
         ):
 
-            candidate[
-                "stability"
-            ] = {
-                "nearby":
-                    len(nearby),
+            nearby.append(
+                p
+            )
 
-                "median_wr":
-                    median_wr,
+    if not nearby:
 
-                "median_r":
-                    median_r,
+        return {
+            "stable": False,
+            "nearby": 0,
+            "median_r": 0.0,
+            "median_wr": 0.0,
+            "positive_pct": 0.0,
+        }
 
-                "positive_pct":
-                    positive_pct,
-            }
+    median_r = float(
+        np.median(
+            [
+                x["total_r"]
+                for x in nearby
+            ]
+        )
+    )
 
-            stable.append(
+    median_wr = float(
+        np.median(
+            [
+                x["win_rate"]
+                for x in nearby
+            ]
+        )
+    )
+
+    positive_pct = float(
+        np.mean(
+            [
+                x["total_r"] > 0
+                for x in nearby
+            ]
+        ) * 100
+    )
+
+    stable = (
+        len(nearby) >= 8
+        and median_r > 0
+        and positive_pct >= 60
+    )
+
+    return {
+        "stable": stable,
+        "nearby": len(nearby),
+        "median_r": median_r,
+        "median_wr": median_wr,
+        "positive_pct": positive_pct,
+    }
+
+
+# ============================================================
+# OPTIMISE
+# ============================================================
+
+def optimise(
+    df,
+):
+
+    coarse = coarse_search(
+        df
+    )
+
+    if not coarse:
+
+        return None
+
+    fine = fine_search(
+        df,
+        coarse,
+    )
+
+    if not fine:
+
+        return None
+
+    print(
+        "PHASE 3: STABILITY VALIDATION",
+        flush=True,
+    )
+
+    stable_candidates = []
+
+    for i, candidate in enumerate(
+        fine[:10],
+        1,
+    ):
+
+        print(
+            f"Stability candidate "
+            f"{i}/10",
+            flush=True,
+        )
+
+        stability = stability_test(
+            df,
+            candidate,
+        )
+
+        candidate[
+            "stability"
+        ] = stability
+
+        if stability[
+            "stable"
+        ]:
+
+            stable_candidates.append(
                 candidate
             )
 
-    print(
-        f"STABLE CANDIDATES: "
-        f"{len(stable)}"
-    )
+    if not stable_candidates:
 
-    if not stable:
+        print(
+            "NO STABLE CANDIDATES.",
+            flush=True,
+        )
+
         return None
 
-    # --------------------------------------------------------
-    # Stability first.
-    # --------------------------------------------------------
-
-    stable.sort(
+    stable_candidates.sort(
         key=lambda x: (
             x["stability"]["positive_pct"],
             x["stability"]["median_r"],
-            x["quality"],
+            x["performance"]["win_rate"],
+            x["performance"]["trades"],
         ),
         reverse=True,
     )
 
-    return stable[0]
+    return stable_candidates[0]
 
 
 # ============================================================
-# TEST PERIOD
+# TEST OOS
 # ============================================================
 
-def test_period(
-    df,
-    arrays,
+def test_oos(
     selected,
-    start,
-    end,
+    oos_df,
 ):
 
     params = selected[
@@ -1648,43 +1774,21 @@ def test_period(
         wick,
         body,
         separation,
-        max_cross,
         hours,
         threshold,
     ) = params
 
-    mask = (
-        (df["time"] >= start) &
-        (df["time"] <= end)
-    )
-
-    period_df = (
-        df.loc[
-            mask
-        ]
-        .reset_index(drop=True)
-    )
-
-    period_arrays = {
-        key: value[
-            mask.to_numpy()
-        ]
-        for key, value in arrays.items()
-    }
-
-    score = calculate_scores(
-        period_df,
+    score = calculate_score(
+        oos_df,
         wick,
         body,
     )
 
-    results = backtest_candidate(
-        period_df,
-        period_arrays,
+    results = backtest(
+        oos_df,
         score,
         rr,
         separation,
-        max_cross,
         hours,
         threshold,
     )
@@ -1695,7 +1799,7 @@ def test_period(
 
 
 # ============================================================
-# RUN MARKET
+# MARKET
 # ============================================================
 
 def run_market(
@@ -1704,37 +1808,21 @@ def run_market(
 ):
 
     print()
-    print("=" * 60)
+    print("=" * 60, flush=True)
 
     print(
-        f"{market} V11.2 "
-        "REGIME-AWARE OPTIMIZER"
+        f"{market} V11.3",
+        flush=True,
     )
 
-    print("=" * 60)
+    print("=" * 60, flush=True)
 
     df = load_data(
         path
     )
 
-    print(
-        "Preparing indicators..."
-    )
-
     df = prepare_indicators(
         df
-    )
-
-    print(
-        "Preparing fast backtest arrays..."
-    )
-
-    arrays = prepare_backtest_arrays(
-        df
-    )
-
-    print(
-        "Indicators ready."
     )
 
     results = []
@@ -1756,35 +1844,63 @@ def run_market(
         ) = period
 
         print()
-        print("=" * 60)
+        print("=" * 60, flush=True)
 
         print(
-            f"{market} "
-            f"{period_name}"
+            f"{market}: "
+            f"{period_name}",
+            flush=True,
         )
 
-        print("=" * 60)
+        print("=" * 60, flush=True)
 
-        selected = optimise_training(
-            df,
-            arrays,
-            train_start,
-            train_end,
+        train_df = (
+            df[
+                (df["time"] >= train_start) &
+                (df["time"] <= train_end)
+            ]
+            .reset_index(drop=True)
+        )
+
+        oos_df = (
+            df[
+                (df["time"] >= oos_start) &
+                (df["time"] <= oos_end)
+            ]
+            .reset_index(drop=True)
+        )
+
+        print(
+            f"Training candles: "
+            f"{len(train_df)}",
+            flush=True,
+        )
+
+        print(
+            f"OOS candles: "
+            f"{len(oos_df)}",
+            flush=True,
+        )
+
+        print(
+            "Optimising...",
+            flush=True,
+        )
+
+        selected = optimise(
+            train_df
         )
 
         if selected is None:
 
             print(
-                "NO STABLE STRATEGY FOUND"
+                "NO STABLE STRATEGY.",
+                flush=True,
             )
 
             continue
 
-        params = selected[
-            "params"
-        ]
-
-        train_perf = selected[
+        p = selected[
             "performance"
         ]
 
@@ -1792,196 +1908,189 @@ def run_market(
             "stability"
         ]
 
+        params = selected[
+            "params"
+        ]
+
         print()
         print(
-            "SELECTED TRAINING STRATEGY"
-        )
-
-        print("-" * 60)
-
-        print(
-            f"RR: {params[0]}"
+            "SELECTED STRATEGY",
+            flush=True,
         )
 
         print(
-            f"Wick: {params[1]}"
+            f"RR: {params[0]}",
+            flush=True,
         )
 
         print(
-            f"Body: {params[2]}"
+            f"Wick: {params[1]}",
+            flush=True,
         )
 
         print(
-            f"Separation: {params[3]}"
+            f"Body: {params[2]}",
+            flush=True,
         )
 
         print(
-            f"Max cross: {params[4]}"
+            f"Separation: "
+            f"{params[3]}",
+            flush=True,
         )
 
         print(
             f"Hours: "
-            f"{','.join(map(str, params[5]))}"
+            f"{','.join(map(str, params[4]))}",
+            flush=True,
         )
 
         print(
-            f"Threshold: {params[6]}"
+            f"Threshold: "
+            f"{params[5]}",
+            flush=True,
         )
 
         print(
             f"Training trades: "
-            f"{train_perf['trades']}"
+            f"{p['trades']}",
+            flush=True,
         )
 
         print(
             f"Training WR: "
-            f"{train_perf['win_rate']:.2f}%"
+            f"{p['win_rate']:.2f}%",
+            flush=True,
         )
 
         print(
             f"Training R: "
-            f"{train_perf['total_r']:.2f}"
-        )
-
-        print(
-            f"Training PF: "
-            f"{train_perf['profit_factor']:.2f}"
+            f"{p['total_r']:.2f}",
+            flush=True,
         )
 
         print()
         print(
-            "PARAMETER STABILITY"
+            "PARAMETER STABILITY",
+            flush=True,
         )
 
         print(
             f"Nearby: "
-            f"{stability['nearby']}"
+            f"{stability['nearby']}",
+            flush=True,
         )
 
         print(
             f"Median nearby WR: "
-            f"{stability['median_wr']:.2f}%"
+            f"{stability['median_wr']:.2f}%",
+            flush=True,
         )
 
         print(
             f"Median nearby R: "
-            f"{stability['median_r']:.2f}R"
+            f"{stability['median_r']:.2f}R",
+            flush=True,
         )
 
         print(
             f"Positive nearby: "
-            f"{stability['positive_pct']:.1f}%"
+            f"{stability['positive_pct']:.1f}%",
+            flush=True,
         )
 
         print(
-            "Stability: PASS"
-        )
-
-        # ----------------------------------------------------
-        # OOS
-        # ----------------------------------------------------
-
-        oos_perf = test_period(
-            df,
-            arrays,
-            selected,
-            oos_start,
-            oos_end,
+            "Stability: PASS",
+            flush=True,
         )
 
         print()
         print(
-            "OUT-OF-SAMPLE RESULT"
+            "OUT-OF-SAMPLE RESULT",
+            flush=True,
         )
 
-        print("-" * 60)
+        oos = test_oos(
+            selected,
+            oos_df,
+        )
 
         print(
             f"Trades: "
-            f"{oos_perf['trades']}"
+            f"{oos['trades']}",
+            flush=True,
         )
 
         print(
             f"Wins: "
-            f"{oos_perf['wins']}"
+            f"{oos['wins']}",
+            flush=True,
         )
 
         print(
             f"Losses: "
-            f"{oos_perf['losses']}"
+            f"{oos['losses']}",
+            flush=True,
         )
 
         print(
             f"Win rate: "
-            f"{oos_perf['win_rate']:.2f}%"
+            f"{oos['win_rate']:.2f}%",
+            flush=True,
         )
 
         print(
             f"Total R: "
-            f"{oos_perf['total_r']:.2f}"
+            f"{oos['total_r']:.2f}",
+            flush=True,
         )
 
         print(
             f"Profit factor: "
-            f"{oos_perf['profit_factor']:.2f}"
+            f"{oos['profit_factor']:.2f}",
+            flush=True,
         )
 
         print(
             f"Max drawdown: "
-            f"{oos_perf['max_drawdown']:.2f}R"
-        )
-
-        print(
-            f"Longest losing streak: "
-            f"{oos_perf['losing_streak']}"
+            f"{oos['max_drawdown']:.2f}R",
+            flush=True,
         )
 
         results.append(
             {
-                "period":
-                    period_name,
+                "market": market,
+                "period": period_name,
 
                 "train_trades":
-                    train_perf["trades"],
+                    p["trades"],
 
                 "train_win_rate":
-                    train_perf["win_rate"],
+                    p["win_rate"],
 
                 "train_total_r":
-                    train_perf["total_r"],
+                    p["total_r"],
 
                 "oos_trades":
-                    oos_perf["trades"],
+                    oos["trades"],
 
                 "oos_wins":
-                    oos_perf["wins"],
+                    oos["wins"],
 
                 "oos_losses":
-                    oos_perf["losses"],
+                    oos["losses"],
 
                 "oos_win_rate":
-                    oos_perf["win_rate"],
+                    oos["win_rate"],
 
                 "oos_total_r":
-                    oos_perf["total_r"],
+                    oos["total_r"],
 
                 "oos_profit_factor":
-                    oos_perf[
-                        "profit_factor"
-                    ],
+                    oos["profit_factor"],
 
                 "oos_drawdown":
-                    oos_perf[
-                        "max_drawdown"
-                    ],
-
-                "oos_losing_streak":
-                    oos_perf[
-                        "losing_streak"
-                    ],
-
-                "stable":
-                    True,
+                    oos["max_drawdown"],
 
                 "rr":
                     params[0],
@@ -1995,104 +2104,27 @@ def run_market(
                 "separation":
                     params[3],
 
-                "max_cross":
-                    params[4],
-
                 "hours":
                     ",".join(
                         map(
                             str,
-                            params[5],
+                            params[4],
                         )
                     ),
 
                 "threshold":
-                    params[6],
+                    params[5],
+
+                "stability_nearby":
+                    stability["nearby"],
+
+                "stability_median_r":
+                    stability["median_r"],
+
+                "stability_positive_pct":
+                    stability["positive_pct"],
             }
         )
-
-    # ========================================================
-    # FINAL 2026 HOLDOUT
-    # ========================================================
-
-    print()
-    print("=" * 60)
-
-    print(
-        f"{market} FINAL "
-        "NEVER-SEEN HOLDOUT"
-    )
-
-    print("=" * 60)
-
-    final_selected = optimise_training(
-        df,
-        arrays,
-        FINAL_TRAIN_START,
-        FINAL_TRAIN_END,
-    )
-
-    holdout_result = None
-
-    if final_selected is None:
-
-        print(
-            "NO STABLE FINAL STRATEGY"
-        )
-
-    else:
-
-        holdout_perf = test_period(
-            df,
-            arrays,
-            final_selected,
-            FINAL_HOLDOUT_START,
-            "2100-01-01",
-        )
-
-        print()
-        print(
-            "FINAL 2026 HOLDOUT"
-        )
-
-        print("-" * 60)
-
-        print(
-            f"Trades: "
-            f"{holdout_perf['trades']}"
-        )
-
-        print(
-            f"Wins: "
-            f"{holdout_perf['wins']}"
-        )
-
-        print(
-            f"Losses: "
-            f"{holdout_perf['losses']}"
-        )
-
-        print(
-            f"Win rate: "
-            f"{holdout_perf['win_rate']:.2f}%"
-        )
-
-        print(
-            f"Total R: "
-            f"{holdout_perf['total_r']:.2f}"
-        )
-
-        print(
-            f"Profit factor: "
-            f"{holdout_perf['profit_factor']:.2f}"
-        )
-
-        print(
-            f"Max drawdown: "
-            f"{holdout_perf['max_drawdown']:.2f}R"
-        )
-
-        holdout_result = holdout_perf
 
     result_df = pd.DataFrame(
         results
@@ -2103,10 +2135,7 @@ def run_market(
         index=False,
     )
 
-    return (
-        result_df,
-        holdout_result,
-    )
+    return result_df
 
 
 # ============================================================
@@ -2115,50 +2144,7 @@ def run_market(
 
 def main():
 
-    print("=" * 60)
-
-    print(
-        "MULTI-MARKET STRATEGY "
-        "OPTIMIZER V11.2"
-    )
-
-    print("=" * 60)
-
-    print(
-        "FAST VECTORIZED SEARCH: ENABLED"
-    )
-
-    print(
-        "REGIME FILTERING: ENABLED"
-    )
-
-    print(
-        "REJECTION / REVERSAL: ENABLED"
-    )
-
-    print(
-        "WALK-FORWARD TESTING: ENABLED"
-    )
-
-    print(
-        "PARAMETER STABILITY: ENABLED"
-    )
-
-    print(
-        "STRICT 2026 HOLDOUT: ENABLED"
-    )
-
-    print(
-        "MINIMUM SAMPLE FILTER: ENABLED"
-    )
-
-    print(
-        "NO LIVE TRADING"
-    )
-
-    print("=" * 60)
-
-    market_outputs = {}
+    market_results = {}
 
     for market, path in (
         MARKETS.items()
@@ -2166,7 +2152,7 @@ def main():
 
         try:
 
-            market_outputs[
+            market_results[
                 market
             ] = run_market(
                 market,
@@ -2176,18 +2162,20 @@ def main():
         except Exception as error:
 
             print()
-            print("=" * 60)
+            print("=" * 60, flush=True)
 
             print(
-                f"{market} FAILED"
+                f"{market} FAILED",
+                flush=True,
             )
 
             print(
                 f"{type(error).__name__}: "
-                f"{error}"
+                f"{error}",
+                flush=True,
             )
 
-            print("=" * 60)
+            print("=" * 60, flush=True)
 
     # ========================================================
     # SUMMARY
@@ -2202,14 +2190,12 @@ def main():
     profitable_periods = 0
     total_periods = 0
 
-    for market, output in (
-        market_outputs.items()
+    for market, result_df in (
+        market_results.items()
     ):
 
-        if output is None:
+        if result_df is None:
             continue
-
-        result_df, holdout = output
 
         if result_df.empty:
             continue
@@ -2226,7 +2212,7 @@ def main():
             ].sum()
         )
 
-        total_market_r = float(
+        market_r = float(
             result_df[
                 "oos_total_r"
             ].sum()
@@ -2244,7 +2230,7 @@ def main():
             ).sum()
         )
 
-        win_rate = (
+        wr = (
             wins /
             trades *
             100
@@ -2254,26 +2240,28 @@ def main():
 
         total_trades += trades
         total_wins += wins
-        total_r += total_market_r
+        total_r += market_r
 
         profitable_periods += (
             profitable
         )
 
-        total_periods += periods
+        total_periods += (
+            periods
+        )
 
         if (
             trades >= 100
-            and win_rate >= 75
-            and total_market_r > 0
+            and wr >= 75
+            and market_r > 0
         ):
 
             verdict = "PROMISING"
 
         elif (
             trades >= 50
-            and win_rate >= 65
-            and total_market_r > 0
+            and wr >= 65
+            and market_r > 0
         ):
 
             verdict = "INTERESTING"
@@ -2292,13 +2280,13 @@ def main():
 
                 "oos_win_rate":
                     round(
-                        win_rate,
+                        wr,
                         2,
                     ),
 
                 "oos_total_r":
                     round(
-                        total_market_r,
+                        market_r,
                         2,
                     ),
 
@@ -2307,37 +2295,6 @@ def main():
 
                 "verdict":
                     verdict,
-
-                "holdout_trades":
-                    (
-                        holdout["trades"]
-                        if holdout
-                        else 0
-                    ),
-
-                "holdout_win_rate":
-                    (
-                        round(
-                            holdout[
-                                "win_rate"
-                            ],
-                            2,
-                        )
-                        if holdout
-                        else 0
-                    ),
-
-                "holdout_total_r":
-                    (
-                        round(
-                            holdout[
-                                "total_r"
-                            ],
-                            2,
-                        )
-                        if holdout
-                        else 0
-                    ),
             }
         )
 
@@ -2350,34 +2307,6 @@ def main():
         index=False,
     )
 
-    # ========================================================
-    # FINAL OUTPUT
-    # ========================================================
-
-    print()
-    print("=" * 60)
-
-    print(
-        "V11.2 FINAL MULTI-MARKET "
-        "SUMMARY"
-    )
-
-    print("=" * 60)
-
-    if summary_df.empty:
-
-        print(
-            "NO COMPLETED MARKET RESULTS"
-        )
-
-    else:
-
-        print(
-            summary_df.to_string(
-                index=False
-            )
-        )
-
     combined_wr = (
         total_wins /
         total_trades *
@@ -2387,69 +2316,95 @@ def main():
     )
 
     print()
-    print("=" * 60)
+    print("=" * 60, flush=True)
 
     print(
-        "COMBINED GENUINE "
-        "OUT-OF-SAMPLE"
+        "V11.3 FINAL MULTI-MARKET "
+        "SUMMARY",
+        flush=True,
     )
 
-    print("=" * 60)
+    print("=" * 60, flush=True)
+
+    if summary_df.empty:
+
+        print(
+            "NO COMPLETED MARKET RESULTS",
+            flush=True,
+        )
+
+    else:
+
+        print(
+            summary_df.to_string(
+                index=False
+            ),
+            flush=True,
+        )
+
+    print()
+    print("=" * 60, flush=True)
 
     print(
-        f"Trades: "
-        f"{total_trades}"
+        "COMBINED CROSS-MARKET OOS",
+        flush=True,
+    )
+
+    print("=" * 60, flush=True)
+
+    print(
+        f"Trades: {total_trades}",
+        flush=True,
     )
 
     print(
-        f"Wins: "
-        f"{total_wins}"
+        f"Wins: {total_wins}",
+        flush=True,
     )
 
     print(
         f"Win rate: "
-        f"{combined_wr:.2f}%"
+        f"{combined_wr:.2f}%",
+        flush=True,
     )
 
     print(
         f"Total R: "
-        f"{total_r:.2f}"
+        f"{total_r:.2f}",
+        flush=True,
     )
 
     print(
         f"Profitable periods: "
         f"{profitable_periods}/"
-        f"{total_periods}"
+        f"{total_periods}",
+        flush=True,
     )
-
-    # ========================================================
-    # TARGET
-    # ========================================================
 
     print()
-    print("=" * 60)
+    print("=" * 60, flush=True)
 
     print(
-        "V11.2 TARGET CHECK"
+        "V11.3 TARGET CHECK",
+        flush=True,
     )
 
-    print("=" * 60)
+    print("=" * 60, flush=True)
 
     print(
-        "TARGET:"
-    )
-
-    print(
-        "~82% WIN RATE"
-    )
-
-    print(
-        "200+ GENUINELY "
-        "OUT-OF-SAMPLE TRADES"
+        "TARGET: ~82% WIN RATE",
+        flush=True,
     )
 
     print(
-        "POSITIVE TOTAL R"
+        "TARGET: 200+ GENUINELY "
+        "OUT-OF-SAMPLE TRADES",
+        flush=True,
+    )
+
+    print(
+        "TARGET: POSITIVE TOTAL R",
+        flush=True,
     )
 
     if (
@@ -2459,7 +2414,8 @@ def main():
     ):
 
         print(
-            "TARGET STATUS: ACHIEVED"
+            "TARGET STATUS: ACHIEVED",
+            flush=True,
         )
 
     elif (
@@ -2469,7 +2425,8 @@ def main():
     ):
 
         print(
-            "TARGET STATUS: VERY PROMISING"
+            "TARGET STATUS: VERY PROMISING",
+            flush=True,
         )
 
     elif (
@@ -2479,78 +2436,80 @@ def main():
     ):
 
         print(
-            "TARGET STATUS: PROMISING"
+            "TARGET STATUS: PROMISING",
+            flush=True,
         )
 
     else:
 
         print(
-            "TARGET STATUS: NOT ACHIEVED YET"
+            "TARGET STATUS: NOT ACHIEVED YET",
+            flush=True,
         )
 
-    # ========================================================
-    # SAFETY
-    # ========================================================
-
     print()
-    print("=" * 60)
+    print("=" * 60, flush=True)
 
     print(
-        "IMPORTANT"
+        "IMPORTANT",
+        flush=True,
     )
 
-    print("=" * 60)
+    print("=" * 60, flush=True)
 
     print(
         "OOS data is never used "
-        "for optimisation."
+        "for optimisation.",
+        flush=True,
     )
 
     print(
-        "The 2026 holdout is kept "
-        "separate from optimisation."
+        "Each walk-forward period "
+        "is independently optimised.",
+        flush=True,
     )
 
     print(
-        "Minimum sample filtering "
-        "prevents tiny high-WR samples."
+        "This is research only.",
+        flush=True,
     )
 
     print(
-        "This is research only."
-    )
-
-    print(
-        "DO NOT IMPLEMENT LIVE."
+        "DO NOT IMPLEMENT LIVE.",
+        flush=True,
     )
 
     print()
     print(
-        "Results saved:"
+        "Results saved:",
+        flush=True,
     )
 
     print(
-        RESULT_FILES["XAUUSD"]
+        RESULT_FILES["XAUUSD"],
+        flush=True,
     )
 
     print(
-        RESULT_FILES["EURUSD"]
+        RESULT_FILES["EURUSD"],
+        flush=True,
     )
 
     print(
-        SUMMARY_FILE
+        SUMMARY_FILE,
+        flush=True,
     )
 
     print()
-    print("=" * 60)
+    print("=" * 60, flush=True)
 
     print(
-        "OPTIMIZER V11.2 COMPLETE"
+        "OPTIMIZER V11.3 COMPLETE",
+        flush=True,
     )
 
-    print("=" * 60)
+    print("=" * 60, flush=True)
 
 
 if __name__ == "__main__":
-
     main()
