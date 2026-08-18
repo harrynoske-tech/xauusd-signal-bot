@@ -1,13 +1,29 @@
 # ============================================================
-# MULTI-MARKET STRATEGY OPTIMIZER V11.9
+# MULTI-MARKET STRATEGY OPTIMIZER V12
 # ============================================================
-# V11.8 CONTROLLED R/PF REFINEMENT
+# V11.8 ROBUSTNESS / REGIME GENERALISATION REFINEMENT
 #
-# OBJECTIVE:
-#   Preserve >=75% OOS WR
-#   Improve total R
-#   Improve profit factor
-#   Maintain >=200 genuine OOS trades
+# V11.8 BASELINE TO BEAT:
+#   1,101 OOS trades
+#   75.66% OOS WR
+#   +33.00R
+#   5/6 profitable periods
+#   5/6 stable periods
+#
+# V12 OBJECTIVE:
+#   Preserve the V11.8 edge.
+#   Improve weak walk-forward regimes.
+#   Do NOT optimise for training WR alone.
+#
+# PRIMARY TARGET:
+#   >=75% combined OOS WR
+#   >=200 genuine OOS trades
+#   positive total R
+#
+# SECONDARY TARGET:
+#   >=5/6 profitable periods
+#   >=5/6 stable periods
+#   Beat V11.8 total R
 #
 # NO LIVE TRADING
 # ============================================================
@@ -21,19 +37,58 @@ import pandas as pd
 
 warnings.filterwarnings("ignore")
 
+
+# ============================================================
+# FILES
+# ============================================================
+
 MARKETS = {
     "XAUUSD": "data/XAUUSD_15m.csv",
     "EURUSD": "data/EURUSD_15m.csv",
 }
 
 RESULT_FILES = {
-    "XAUUSD": "data/xauusd_optimizer_v11_9_results.csv",
-    "EURUSD": "data/eurusd_optimizer_v11_9_results.csv",
+    "XAUUSD": "data/xauusd_optimizer_v12_results.csv",
+    "EURUSD": "data/eurusd_optimizer_v12_results.csv",
 }
 
 SUMMARY_FILE = (
-    "data/multi_market_optimizer_v11_9_summary.csv"
+    "data/multi_market_optimizer_v12_summary.csv"
 )
+
+
+# ============================================================
+# V11.8 BENCHMARK
+# ============================================================
+
+BASELINE = {
+    "XAUUSD": {
+        "trades": 679,
+        "wr": 75.26,
+        "r": 20.30,
+        "profitable": 3,
+        "stable": 3,
+    },
+    "EURUSD": {
+        "trades": 422,
+        "wr": 76.30,
+        "r": 12.70,
+        "profitable": 2,
+        "stable": 2,
+    },
+    "combined": {
+        "trades": 1101,
+        "wr": 75.66,
+        "r": 33.00,
+        "profitable": 5,
+        "stable": 5,
+    },
+}
+
+
+# ============================================================
+# WALK FORWARD
+# ============================================================
 
 WALK_FORWARD = [
     (
@@ -59,32 +114,13 @@ WALK_FORWARD = [
     ),
 ]
 
-MIN_TRAIN_TRADES = 40
-MIN_SUBPERIOD_TRADES = 10
-MIN_RECENT_TRADES = 20
-MAX_STABILITY_CANDIDATES = 8
-
-# V11.8 WR floor.
-# Candidates below this are not allowed to win merely
-# because they produce more R.
-MIN_ACCEPTABLE_WR = 73.0
-
-# Stability requirements.
-MIN_NEARBY_WR = 68.0
-MIN_NEARBY_POSITIVE = 60.0
 
 # ============================================================
-# V11.9 SEARCH SPACE
+# SEARCH
 #
-# V11.8's winning area was concentrated around:
+# Deliberately centred on the V11.8 winning neighbourhood.
 #
-# RR       0.35 - 0.40
-# Wick     0.20
-# Body     0.15
-# Separation 0.0004 - 0.0005
-#
-# V11.9 tests slightly higher RR values to determine whether
-# we can retain the high WR while improving expectancy.
+# We are NOT repeating V11.9's broad RR expansion.
 # ============================================================
 
 SEARCH = {
@@ -92,9 +128,6 @@ SEARCH = {
         "rr": [
             0.35,
             0.40,
-            0.45,
-            0.50,
-            0.55,
         ],
         "wick": [
             0.20,
@@ -108,7 +141,6 @@ SEARCH = {
             0.00035,
             0.00040,
             0.00050,
-            0.00065,
         ],
         "threshold": [
             -0.25,
@@ -124,9 +156,6 @@ SEARCH = {
         "rr": [
             0.35,
             0.40,
-            0.45,
-            0.50,
-            0.55,
         ],
         "wick": [
             0.20,
@@ -146,16 +175,35 @@ SEARCH = {
             0.00,
         ],
         "hours": [
+            (3, 4),
             (3, 4, 5),
             (4, 5),
-            (3, 4),
         ],
     },
 }
 
 
 # ============================================================
-# DATA
+# REQUIREMENTS
+# ============================================================
+
+MIN_TRAIN_TRADES = 40
+MIN_SUBPERIOD_TRADES = 10
+MIN_RECENT_TRADES = 20
+
+MAX_STABILITY_CANDIDATES = 10
+
+MIN_NEARBY_WR = 68.0
+MIN_NEARBY_POSITIVE = 60.0
+
+# V11.8 is the benchmark.
+# We do not allow a candidate with poor WR to win
+# just because it makes more training R.
+MIN_TRAIN_WR = 72.0
+
+
+# ============================================================
+# DATA LOADING
 # ============================================================
 
 def load_data(path):
@@ -222,15 +270,13 @@ def load_data(path):
                 errors="coerce",
             )
 
-            if (
-                parsed.notna().mean()
-                >= 0.90
-            ):
+            if parsed.notna().mean() >= 0.90:
 
                 time_column = col
                 break
 
     if time_column is None:
+
         raise RuntimeError(
             "Could not find datetime column."
         )
@@ -241,21 +287,39 @@ def load_data(path):
         errors="coerce",
     )
 
-    for target, aliases in {
-        "open": ["open", "o", "open_price"],
-        "high": ["high", "h", "high_price"],
-        "low": ["low", "l", "low_price"],
-        "close": ["close", "c", "close_price"],
-    }.items():
+    aliases = {
+        "open": [
+            "open",
+            "o",
+            "open_price",
+        ],
+        "high": [
+            "high",
+            "h",
+            "high_price",
+        ],
+        "low": [
+            "low",
+            "l",
+            "low_price",
+        ],
+        "close": [
+            "close",
+            "c",
+            "close_price",
+        ],
+    }
+
+    for target, names in aliases.items():
 
         if target in df.columns:
             continue
 
-        for alias in aliases:
+        for name in names:
 
-            if alias in df.columns:
+            if name in df.columns:
 
-                df[target] = df[alias]
+                df[target] = df[name]
                 break
 
     required = [
@@ -273,6 +337,7 @@ def load_data(path):
     ]
 
     if missing:
+
         raise RuntimeError(
             f"{path} missing required columns: "
             f"{missing}"
@@ -377,13 +442,13 @@ def prepare_indicators(df):
         np.nan,
     )
 
-    prev_close = c.shift(1)
+    previous_close = c.shift(1)
 
     true_range = pd.concat(
         [
             h - l,
-            (h - prev_close).abs(),
-            (l - prev_close).abs(),
+            (h - previous_close).abs(),
+            (l - previous_close).abs(),
         ],
         axis=1,
     ).max(axis=1)
@@ -463,55 +528,73 @@ def build_signal(
     separation,
 ):
 
-    lower = df[
-        "lower_wick"
-    ].to_numpy()
+    lower = (
+        df["lower_wick"]
+        .to_numpy()
+    )
 
-    upper = df[
-        "upper_wick"
-    ].to_numpy()
+    upper = (
+        df["upper_wick"]
+        .to_numpy()
+    )
 
-    body_ratio = df[
-        "body_ratio"
-    ].to_numpy()
+    body_ratio = (
+        df["body_ratio"]
+        .to_numpy()
+    )
 
-    opens = df[
-        "open"
-    ].to_numpy()
+    opens = (
+        df["open"]
+        .to_numpy()
+    )
 
-    closes = df[
-        "close"
-    ].to_numpy()
+    closes = (
+        df["close"]
+        .to_numpy()
+    )
 
-    ema20 = df[
-        "ema20"
-    ].to_numpy()
+    ema20 = (
+        df["ema20"]
+        .to_numpy()
+    )
 
-    ema50 = df[
-        "ema50"
-    ].to_numpy()
+    ema50 = (
+        df["ema50"]
+        .to_numpy()
+    )
 
-    momentum = df[
-        "momentum5"
-    ].to_numpy()
+    momentum = (
+        df["momentum5"]
+        .to_numpy()
+    )
 
-    location = df[
-        "range_position"
-    ].to_numpy()
+    location = (
+        df["range_position"]
+        .to_numpy()
+    )
 
-    atr = df[
-        "atr14"
-    ].to_numpy()
+    atr = (
+        df["atr14"]
+        .to_numpy()
+    )
 
-    bullish = closes > opens
-    bearish = closes < opens
+    bullish = (
+        closes > opens
+    )
+
+    bearish = (
+        closes < opens
+    )
 
     score = np.zeros(
         len(df),
         dtype=float,
     )
 
-    # Primary rejection.
+    # --------------------------------------------------------
+    # Primary rejection component
+    # --------------------------------------------------------
+
     score += np.where(
         lower >= wick,
         1.0,
@@ -542,41 +625,49 @@ def build_signal(
         0.0,
     )
 
-    # Location.
+    # --------------------------------------------------------
+    # Range location
+    # --------------------------------------------------------
+
     score += np.where(
-        bullish
-        &
+        bullish &
         (location <= 0.35),
         0.50,
         0.0,
     )
 
     score -= np.where(
-        bearish
-        &
+        bearish &
         (location >= 0.65),
         0.50,
         0.0,
     )
 
-    # Momentum.
+    # --------------------------------------------------------
+    # Momentum
+    # --------------------------------------------------------
+
     score += np.where(
-        bullish
-        &
+        bullish &
         (momentum > 0),
         0.25,
         0.0,
     )
 
     score -= np.where(
-        bearish
-        &
+        bearish &
         (momentum < 0),
         0.25,
         0.0,
     )
 
-    # Very soft EMA component.
+    # --------------------------------------------------------
+    # Very weak EMA component.
+    #
+    # Deliberately kept weak because V11.4 demonstrated that
+    # aggressively stacking filters can eliminate the edge.
+    # --------------------------------------------------------
+
     score += np.where(
         ema20 > ema50,
         0.10,
@@ -589,7 +680,7 @@ def build_signal(
         0.0,
     )
 
-    ema_sep = np.where(
+    ema_separation = np.where(
         atr > 0,
         np.abs(
             ema20 - ema50
@@ -598,7 +689,7 @@ def build_signal(
     )
 
     score += np.where(
-        ema_sep >= separation,
+        ema_separation >= separation,
         np.where(
             ema20 > ema50,
             0.10,
@@ -626,34 +717,39 @@ def backtest(
     threshold,
 ):
 
-    high = df[
-        "high"
-    ].to_numpy(
-        dtype=float
+    high = (
+        df["high"]
+        .to_numpy(
+            dtype=float
+        )
     )
 
-    low = df[
-        "low"
-    ].to_numpy(
-        dtype=float
+    low = (
+        df["low"]
+        .to_numpy(
+            dtype=float
+        )
     )
 
-    opens = df[
-        "open"
-    ].to_numpy(
-        dtype=float
+    opens = (
+        df["open"]
+        .to_numpy(
+            dtype=float
+        )
     )
 
-    closes = df[
-        "close"
-    ].to_numpy(
-        dtype=float
+    closes = (
+        df["close"]
+        .to_numpy(
+            dtype=float
+        )
     )
 
-    atr = df[
-        "atr14"
-    ].to_numpy(
-        dtype=float
+    atr = (
+        df["atr14"]
+        .to_numpy(
+            dtype=float
+        )
     )
 
     hour = (
@@ -691,6 +787,8 @@ def backtest(
 
     selected = []
 
+    # V11.8-style low-frequency
+    # signal spacing.
     next_available = -1
 
     for index in indices:
@@ -700,8 +798,8 @@ def backtest(
 
         selected.append(index)
 
-        # Preserve the V11.8 low-frequency
-        # behaviour.
+        # 48 x 15-minute candles =
+        # 12 hours between signals.
         next_available = (
             index + 48
         )
@@ -798,23 +896,31 @@ def backtest(
                 highs >= stop
             )
 
-        target_pos = np.flatnonzero(
-            target_hits
+        target_positions = (
+            np.flatnonzero(
+                target_hits
+            )
         )
 
-        stop_pos = np.flatnonzero(
-            stop_hits
+        stop_positions = (
+            np.flatnonzero(
+                stop_hits
+            )
         )
 
         first_target = (
-            target_pos[0]
-            if len(target_pos)
+            target_positions[0]
+            if len(
+                target_positions
+            )
             else 10**9
         )
 
         first_stop = (
-            stop_pos[0]
-            if len(stop_pos)
+            stop_positions[0]
+            if len(
+                stop_positions
+            )
             else 10**9
         )
 
@@ -905,9 +1011,13 @@ def performance(results):
         dtype=float,
     )
 
-    wins = results > 0
+    wins = (
+        results > 0
+    )
 
-    trades = len(results)
+    trades = len(
+        results
+    )
 
     wins_count = int(
         wins.sum()
@@ -970,6 +1080,7 @@ def performance(results):
         if value <= 0:
 
             current += 1
+
             longest = max(
                 longest,
                 current,
@@ -997,12 +1108,15 @@ def performance(results):
 
 
 # ============================================================
-# RECENCY-WEIGHTED TRAINING SCORE
+# TRAINING QUALITY
+#
+# V12 is specifically trying to avoid the V11.9 failure mode:
+# selecting a strategy that looks attractive in aggregate
+# training data but breaks in another regime.
 # ============================================================
 
 def training_quality(
-    df,
-    results,
+    results
 ):
 
     p = performance(
@@ -1015,7 +1129,15 @@ def training_quality(
     ):
         return -999999.0
 
-    n = len(results)
+    if (
+        p["win_rate"] <
+        MIN_TRAIN_WR
+    ):
+        return -999999.0
+
+    n = len(
+        results
+    )
 
     third = max(
         1,
@@ -1045,14 +1167,22 @@ def training_quality(
         len(recent) <
         MIN_RECENT_TRADES
     ):
+
         return -999999.0
 
-    po = performance(old)
-    pm = performance(middle)
-    pr = performance(recent)
+    po = performance(
+        old
+    )
 
-    # Recent data matters most, but we do not
-    # completely discard older regimes.
+    pm = performance(
+        middle
+    )
+
+    pr = performance(
+        recent
+    )
+
+    # Recent period receives more weight.
     weighted_wr = (
         po["win_rate"] * 0.20
         +
@@ -1069,36 +1199,46 @@ def training_quality(
         pr["total_r"] * 0.50
     )
 
-    # Strongly favour candidates that actually
-    # make money while keeping WR high.
+    # Penalise regime dependence.
+    wr_spread = max(
+        po["win_rate"],
+        pm["win_rate"],
+        pr["win_rate"],
+    ) - min(
+        po["win_rate"],
+        pm["win_rate"],
+        pr["win_rate"],
+    )
+
+    r_penalty = (
+        p["max_drawdown"] *
+        0.35
+    )
+
     quality = (
-        weighted_wr * 1.0
+        weighted_wr
         +
         weighted_r * 2.0
         +
         min(
             p["profit_factor"],
             3.0,
-        ) * 15.0
+        ) * 10.0
         -
-        p["max_drawdown"] * 0.25
+        wr_spread * 0.75
+        -
+        r_penalty
     )
 
-    # Hard WR protection.
-    if (
-        p["win_rate"] <
-        MIN_ACCEPTABLE_WR
-    ):
-        quality -= 100.0
-
+    # Every training subperiod should contribute.
     if po["total_r"] < 0:
-        quality -= 5.0
+        quality -= 8.0
 
     if pm["total_r"] < 0:
-        quality -= 3.0
+        quality -= 6.0
 
     if pr["total_r"] < 0:
-        quality -= 2.0
+        quality -= 4.0
 
     return float(
         quality
@@ -1127,14 +1267,8 @@ def stability_test(
         set(
             [
                 rr,
-                max(
-                    0.35,
-                    rr - 0.05,
-                ),
-                min(
-                    0.55,
-                    rr + 0.05,
-                ),
+                0.35,
+                0.40,
             ]
         )
     )
@@ -1143,14 +1277,8 @@ def stability_test(
         set(
             [
                 wick,
-                max(
-                    0.20,
-                    wick - 0.05,
-                ),
-                min(
-                    0.25,
-                    wick + 0.05,
-                ),
+                0.20,
+                0.25,
             ]
         )
     )
@@ -1159,14 +1287,8 @@ def stability_test(
         set(
             [
                 body,
-                max(
-                    0.15,
-                    body - 0.05,
-                ),
-                min(
-                    0.20,
-                    body + 0.05,
-                ),
+                0.15,
+                0.20,
             ]
         )
     )
@@ -1175,14 +1297,10 @@ def stability_test(
         set(
             [
                 separation,
-                max(
-                    0.00035,
-                    separation - 0.00010,
-                ),
-                min(
-                    0.00065,
-                    separation + 0.00010,
-                ),
+                0.00035,
+                0.00040,
+                0.00050,
+                0.00065,
             ]
         )
     )
@@ -1240,7 +1358,10 @@ def stability_test(
             p["trades"] >=
             MIN_TRAIN_TRADES
         ):
-            nearby.append(p)
+
+            nearby.append(
+                p
+            )
 
     if len(nearby) < 5:
 
@@ -1297,7 +1418,7 @@ def stability_test(
 
 
 # ============================================================
-# OPTIMISE
+# OPTIMISATION
 # ============================================================
 
 def optimise(
@@ -1408,11 +1529,11 @@ def optimise(
             continue
 
         quality = training_quality(
-            df,
-            result,
+            result
         )
 
         if quality <= -999999:
+
             continue
 
         candidates.append(
@@ -1439,7 +1560,7 @@ def optimise(
 
 
 # ============================================================
-# SELECT
+# SELECT STRATEGY
 # ============================================================
 
 def select_strategy(
@@ -1453,6 +1574,7 @@ def select_strategy(
     )
 
     if not candidates:
+
         return None
 
     print(
@@ -1467,7 +1589,9 @@ def select_strategy(
 
     stable = []
 
-    for i in range(count):
+    for i in range(
+        count
+    ):
 
         print(
             f"Stability candidate "
@@ -1477,16 +1601,18 @@ def select_strategy(
 
         candidate = candidates[i]
 
-        test = stability_test(
+        stability = stability_test(
             df,
             candidate,
         )
 
         candidate[
             "stability"
-        ] = test
+        ] = stability
 
-        if test["stable"]:
+        if stability[
+            "stable"
+        ]:
 
             stable.append(
                 candidate
@@ -1501,21 +1627,16 @@ def select_strategy(
 
         return None
 
-    # Prefer R/PF among candidates that
-    # preserve the WR floor.
+    # V12 is NOT allowed to select based
+    # on raw training R alone.
     stable.sort(
         key=lambda x: (
-            x["performance"][
-                "total_r"
+            x["quality"],
+            x["stability"][
+                "positive_pct"
             ],
             x["performance"][
                 "profit_factor"
-            ],
-            x["performance"][
-                "win_rate"
-            ],
-            x["stability"][
-                "positive_pct"
             ],
         ),
         reverse=True,
@@ -1537,7 +1658,7 @@ def run_market(
     print("=" * 60, flush=True)
 
     print(
-        f"{market} V11.9",
+        f"{market} V12",
         flush=True,
     )
 
@@ -1908,34 +2029,42 @@ def run_market(
 def main():
 
     print("=" * 60, flush=True)
+
     print(
-        "MULTI-MARKET STRATEGY OPTIMIZER V11.9",
+        "MULTI-MARKET STRATEGY OPTIMIZER V12",
         flush=True,
     )
+
     print("=" * 60, flush=True)
 
     print(
-        "V11.8 CONTROLLED R/PF REFINEMENT",
+        "V11.8 ROBUSTNESS / REGIME "
+        "GENERALISATION REFINEMENT",
         flush=True,
     )
 
     print(
-        "75% OOS WR FLOOR: ENABLED",
+        "V11.8 BASELINE COMPARISON: ENABLED",
         flush=True,
     )
 
     print(
-        "HIGHER RR SEARCH: ENABLED",
+        "REGIME GENERALISATION: ENABLED",
         flush=True,
     )
 
     print(
-        "PROFIT FACTOR OPTIMISATION: ENABLED",
+        "RECENCY WEIGHTING: ENABLED",
         flush=True,
     )
 
     print(
-        "MARKET-SPECIFIC OPTIMISATION: ENABLED",
+        "CONTROLLED V11.8 SEARCH SPACE: ENABLED",
+        flush=True,
+    )
+
+    print(
+        "PARAMETER STABILITY: ENABLED",
         flush=True,
     )
 
@@ -2026,7 +2155,9 @@ def main():
             ].sum()
         )
 
-        periods = len(df)
+        periods = len(
+            df
+        )
 
         profitable = int(
             (
@@ -2078,18 +2209,6 @@ def main():
             trades >= 200
             and
             wr >= 72.0
-            and
-            market_r > 0
-        ):
-
-            verdict = (
-                "STRONG BASELINE"
-            )
-
-        elif (
-            trades >= 100
-            and
-            wr >= 70.0
             and
             market_r > 0
         ):
@@ -2149,7 +2268,7 @@ def main():
     print("=" * 60, flush=True)
 
     print(
-        "V11.9 FINAL MULTI-MARKET SUMMARY",
+        "V12 FINAL MULTI-MARKET SUMMARY",
         flush=True,
     )
 
@@ -2221,24 +2340,55 @@ def main():
     print("=" * 60, flush=True)
 
     print(
-        "V11.9 TARGET CHECK",
+        "V12 TARGET CHECK",
         flush=True,
     )
 
     print("=" * 60, flush=True)
 
     print(
-        "PRIMARY TARGET:",
+        "V11.8 BENCHMARK:",
         flush=True,
     )
 
     print(
-        ">=75% WIN RATE",
+        "1,101 OOS TRADES",
         flush=True,
     )
 
     print(
-        ">=200 GENUINELY OOS TRADES",
+        "75.66% OOS WIN RATE",
+        flush=True,
+    )
+
+    print(
+        "+33.00R",
+        flush=True,
+    )
+
+    print(
+        "5/6 PROFITABLE PERIODS",
+        flush=True,
+    )
+
+    print(
+        "5/6 STABLE PERIODS",
+        flush=True,
+    )
+
+    print()
+    print(
+        "V12 PRIMARY TARGET:",
+        flush=True,
+    )
+
+    print(
+        ">=75% OOS WIN RATE",
+        flush=True,
+    )
+
+    print(
+        ">=200 GENUINE OOS TRADES",
         flush=True,
     )
 
@@ -2249,13 +2399,7 @@ def main():
 
     print()
     print(
-        "SECONDARY TARGET:",
-        flush=True,
-    )
-
-    print(
-        "IMPROVE TOTAL R / PROFIT FACTOR "
-        "OVER V11.8",
+        "V12 MUST BEAT V11.8 TO REPLACE IT.",
         flush=True,
     )
 
@@ -2265,30 +2409,40 @@ def main():
         combined_wr >= 75.0
         and
         total_r > 0
+        and
+        total_r >
+        BASELINE["combined"]["r"]
+        and
+        profitable_periods >= 5
+        and
+        stable_periods >= 5
     ):
 
         print(
-            "TARGET STATUS: ACHIEVED",
+            "TARGET STATUS: V11.8 BEATEN",
             flush=True,
         )
 
     elif (
         total_trades >= 200
         and
-        combined_wr >= 72.0
+        combined_wr >= 75.0
         and
         total_r > 0
     ):
 
         print(
-            "TARGET STATUS: PROMISING",
+            "TARGET STATUS: "
+            "PROMISING BUT V11.8 REMAINS "
+            "THE CHAMPION",
             flush=True,
         )
 
     else:
 
         print(
-            "TARGET STATUS: NOT ACHIEVED YET",
+            "TARGET STATUS: "
+            "NOT ACHIEVED YET",
             flush=True,
         )
 
@@ -2309,14 +2463,13 @@ def main():
     )
 
     print(
-        "The 75% WR floor is applied "
-        "during candidate selection.",
+        "V11.8 remains the benchmark.",
         flush=True,
     )
 
     print(
-        "Higher-RR candidates are tested "
-        "only within the V11.8 neighbourhood.",
+        "V12 does not replace V11.8 "
+        "unless the OOS evidence is better.",
         flush=True,
     )
 
@@ -2361,7 +2514,7 @@ def main():
     print("=" * 60, flush=True)
 
     print(
-        "OPTIMIZER V11.9 COMPLETE",
+        "OPTIMIZER V12 COMPLETE",
         flush=True,
     )
 
