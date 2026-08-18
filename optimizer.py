@@ -1,39 +1,31 @@
 # ============================================================
-# MULTI-MARKET STRATEGY OPTIMIZER V11.6
+# MULTI-MARKET STRATEGY OPTIMIZER V11.7
 # ============================================================
 #
-# V11.6 = CONTROLLED V11.3 REFINEMENT
+# V11.7 = RECENCY-WEIGHTED V11.3 REFINEMENT
 #
-# V11.3 BASELINE:
-#   418 genuine OOS trades
-#   72.01% OOS win rate
-#   +3.40R
+# BENCHMARK:
+#   V11.3 = 418 OOS trades
+#           72.01% WR
+#           +3.40R
 #
-# PRIMARY TARGET:
-#   >=75% OOS WIN RATE
+# TARGET:
+#   >=75% WIN RATE
 #   >=200 GENUINE OOS TRADES
 #   POSITIVE TOTAL R
 #
-# IMPORTANT:
-#   NO LIVE TRADING
-#   OOS DATA NEVER USED FOR OPTIMISATION
+# CORE PRINCIPLE:
+#   DO NOT ADD A HUGE FILTER STACK.
 #
-# V11.6 PRINCIPLE:
-#   DO NOT ADD A LARGE FILTER STACK.
+# V11.7 keeps the simple rejection/reversal architecture
+# and changes ONLY how training candidates are ranked.
 #
-#   The V11.5 filter stack destroyed the V11.3 edge.
-#   V11.6 therefore returns to the simpler V11.3
-#   rejection/reversal architecture.
+# Recent training observations receive more weight than old
+# observations, while older data remains part of validation.
 #
-#   The optimiser now rewards:
-#     - high training win rate
-#     - positive training R
-#     - sufficient sample size
-#     - low drawdown
-#     - parameter stability
+# OOS DATA IS NEVER USED FOR OPTIMISATION.
 #
-#   It does NOT simply select the highest training WR.
-#
+# NO LIVE TRADING.
 # ============================================================
 
 import os
@@ -56,12 +48,12 @@ MARKETS = {
 }
 
 RESULT_FILES = {
-    "XAUUSD": "data/xauusd_optimizer_v11_6_results.csv",
-    "EURUSD": "data/eurusd_optimizer_v11_6_results.csv",
+    "XAUUSD": "data/xauusd_optimizer_v11_7_results.csv",
+    "EURUSD": "data/eurusd_optimizer_v11_7_results.csv",
 }
 
 SUMMARY_FILE = (
-    "data/multi_market_optimizer_v11_6_summary.csv"
+    "data/multi_market_optimizer_v11_7_summary.csv"
 )
 
 
@@ -95,30 +87,7 @@ WALK_FORWARD = [
 
 
 # ============================================================
-# V11.3-STYLE PARAMETER SPACE
-# ============================================================
-#
-# Keep this intentionally small.
-#
-# V11.3 demonstrated that the useful region is approximately:
-#
-# RR:
-#   0.4 - 0.75
-#
-# Wick:
-#   0.20 - 0.35
-#
-# Body:
-#   0.20 - 0.30
-#
-# Separation:
-#   V11.3 used approximately 0.0005 - 0.0008
-#
-# Hours:
-#   primarily 3,4,5 and 12,13
-#
-# V11.6 does NOT add trend/volatility/cooldown filters.
-#
+# PARAMETER SPACE
 # ============================================================
 
 RR_VALUES = [
@@ -162,11 +131,12 @@ HOUR_SETS = [
 
 
 # ============================================================
-# LIMITS
+# TRAINING REQUIREMENTS
 # ============================================================
 
 MIN_TRAIN_TRADES = 40
-MIN_STABILITY_TRADES = 20
+MIN_RECENT_TRADES = 20
+MIN_SUBPERIOD_TRADES = 10
 
 MAX_STABILITY_CANDIDATES = 10
 
@@ -176,11 +146,39 @@ MIN_NEARBY_MEDIAN_WR = 60.0
 
 
 # ============================================================
+# RECENCY WEIGHTS
+# ============================================================
+#
+# The training period is divided into three sections.
+#
+# OLD:
+#   20%
+#
+# MID:
+#   30%
+#
+# RECENT:
+#   50%
+#
+# This does NOT remove old data.
+#
+# It simply tells the optimiser that a strategy performing
+# well recently is more relevant than one whose edge existed
+# mostly several years ago.
+#
+# ============================================================
+
+OLD_WEIGHT = 0.20
+MID_WEIGHT = 0.30
+RECENT_WEIGHT = 0.50
+
+
+# ============================================================
 # HEADER
 # ============================================================
 
 print("=" * 60, flush=True)
-print("MULTI-MARKET STRATEGY OPTIMIZER V11.6", flush=True)
+print("MULTI-MARKET STRATEGY OPTIMIZER V11.7", flush=True)
 print("=" * 60, flush=True)
 
 print(
@@ -189,7 +187,7 @@ print(
 )
 
 print(
-    "CONTROLLED SEARCH: ENABLED",
+    "RECENCY-WEIGHTED TRAINING: ENABLED",
     flush=True,
 )
 
@@ -261,10 +259,6 @@ def load_data(path):
             f"Data file is empty: {path}"
         )
 
-    # --------------------------------------------------------
-    # Normalise column names
-    # --------------------------------------------------------
-
     rename = {}
 
     for column in df.columns:
@@ -284,11 +278,7 @@ def load_data(path):
         columns=rename
     )
 
-    # --------------------------------------------------------
-    # Find time column
-    # --------------------------------------------------------
-
-    candidates = [
+    time_candidates = [
         "time",
         "datetime",
         "date",
@@ -300,7 +290,7 @@ def load_data(path):
 
     time_column = None
 
-    for name in candidates:
+    for name in time_candidates:
 
         if name in df.columns:
 
@@ -353,10 +343,6 @@ def load_data(path):
         utc=True,
         errors="coerce",
     )
-
-    # --------------------------------------------------------
-    # OHLC aliases
-    # --------------------------------------------------------
 
     aliases = {
         "open": [
@@ -415,10 +401,6 @@ def load_data(path):
             f"columns: {missing}"
         )
 
-    # --------------------------------------------------------
-    # Numeric conversion
-    # --------------------------------------------------------
-
     for column in [
         "open",
         "high",
@@ -434,10 +416,6 @@ def load_data(path):
     df = df.dropna(
         subset=required
     )
-
-    # --------------------------------------------------------
-    # OHLC sanity
-    # --------------------------------------------------------
 
     valid = (
         (df["high"] >= df["low"])
@@ -499,10 +477,6 @@ def prepare_indicators(df):
         c - o
     ).abs()
 
-    # --------------------------------------------------------
-    # Candle structure
-    # --------------------------------------------------------
-
     df["body_ratio"] = np.where(
         candle_range > 0,
         body / candle_range,
@@ -527,10 +501,6 @@ def prepare_indicators(df):
         np.nan,
     )
 
-    # --------------------------------------------------------
-    # ATR
-    # --------------------------------------------------------
-
     previous_close = c.shift(1)
 
     true_range = pd.concat(
@@ -551,26 +521,6 @@ def prepare_indicators(df):
         .mean()
     )
 
-    # --------------------------------------------------------
-    # Range / separation data
-    # --------------------------------------------------------
-
-    df["range_mean20"] = (
-        candle_range
-        .rolling(
-            20,
-            min_periods=20,
-        )
-        .mean()
-    )
-
-    # --------------------------------------------------------
-    # EMA structure
-    #
-    # Used as information in the signal, but NOT as a
-    # hard filter. This preserves V11.3's sample size.
-    # --------------------------------------------------------
-
     df["ema20"] = (
         c.ewm(
             span=20,
@@ -585,19 +535,11 @@ def prepare_indicators(df):
         ).mean()
     )
 
-    # --------------------------------------------------------
-    # Momentum
-    # --------------------------------------------------------
-
     df["momentum5"] = (
         c /
         c.shift(5)
         - 1.0
     )
-
-    # --------------------------------------------------------
-    # Rolling range location
-    # --------------------------------------------------------
 
     rolling_high = (
         h.rolling(
@@ -673,11 +615,6 @@ def build_signal(
         .to_numpy()
     )
 
-    close = (
-        df["close"]
-        .to_numpy()
-    )
-
     ema20 = (
         df["ema20"]
         .to_numpy()
@@ -703,37 +640,33 @@ def build_signal(
         .to_numpy()
     )
 
-    # --------------------------------------------------------
-    # Base rejection score
-    # --------------------------------------------------------
-
     score = np.zeros(
         len(df),
         dtype=np.float32,
     )
 
-    # Strong lower wick = bullish rejection
+    # --------------------------------------------------------
+    # Rejection / reversal core
+    # --------------------------------------------------------
+
     score += np.where(
         lower >= wick,
         1.0,
         0.0,
     )
 
-    # Strong upper wick = bearish rejection
     score -= np.where(
         upper >= wick,
         1.0,
         0.0,
     )
 
-    # Small body
     score += np.where(
         body_ratio <= body,
         0.50,
         0.0,
     )
 
-    # Candle direction
     score += np.where(
         bullish,
         0.25,
@@ -747,7 +680,7 @@ def build_signal(
     )
 
     # --------------------------------------------------------
-    # Range-location confirmation
+    # Mild location confirmation
     # --------------------------------------------------------
 
     score += np.where(
@@ -787,9 +720,9 @@ def build_signal(
     )
 
     # --------------------------------------------------------
-    # EMA structure is deliberately NOT a hard filter.
+    # Very small EMA contribution.
     #
-    # It contributes only a small amount to the score.
+    # NOT a hard filter.
     # --------------------------------------------------------
 
     score += np.where(
@@ -805,9 +738,7 @@ def build_signal(
     )
 
     # --------------------------------------------------------
-    # Separation check
-    #
-    # separation is relative, so it works across markets.
+    # Separation contribution.
     # --------------------------------------------------------
 
     ema_separation = np.where(
@@ -868,6 +799,13 @@ def backtest(
         )
     )
 
+    closes = (
+        df["close"]
+        .to_numpy(
+            dtype=np.float64
+        )
+    )
+
     atr = (
         df["atr14"]
         .to_numpy(
@@ -880,10 +818,6 @@ def backtest(
         .dt.hour
         .to_numpy()
     )
-
-    # --------------------------------------------------------
-    # Signal qualification
-    # --------------------------------------------------------
 
     mask = (
         np.isfinite(score)
@@ -908,14 +842,6 @@ def backtest(
         mask
     )
 
-    if len(indices) == 0:
-
-        return np.empty(
-            0,
-            dtype=np.float64,
-        )
-
-    # Need next candle for entry.
     indices = indices[
         indices < len(df) - 1
     ]
@@ -926,15 +852,6 @@ def backtest(
             0,
             dtype=np.float64,
         )
-
-    # --------------------------------------------------------
-    # No overlapping trades.
-    #
-    # The next signal cannot be taken until the previous
-    # trade has finished.
-    #
-    # This is deliberately simple and conservative.
-    # --------------------------------------------------------
 
     selected = []
 
@@ -968,10 +885,6 @@ def backtest(
         selected,
         dtype=np.int64,
     )
-
-    # --------------------------------------------------------
-    # Direction
-    # --------------------------------------------------------
 
     direction = np.where(
         score[selected] >= 0,
@@ -1093,9 +1006,6 @@ def backtest(
             else 10**9
         )
 
-        # Conservative:
-        # same-candle TP + SL = loss.
-
         if first_stop <= first_target:
 
             if first_stop != 10**9:
@@ -1112,19 +1022,9 @@ def backtest(
 
         else:
 
-            # ------------------------------------------------
-            # Neither target nor stop reached.
-            #
-            # Close at the final candle.
-            # We convert the result to R.
-            # ------------------------------------------------
-
-            final_close = (
-                df["close"]
-                .iloc[
-                    end - 1
-                ]
-            )
+            final_close = closes[
+                end - 1
+            ]
 
             if side == 1:
 
@@ -1140,8 +1040,6 @@ def backtest(
                     final_close
                 ) / risk
 
-            # Keep the result bounded so an unusually large
-            # unfinished move cannot dominate optimisation.
             r_value = float(
                 np.clip(
                     r_value,
@@ -1189,10 +1087,6 @@ def performance(results):
 
     wins = (
         results > 0
-    )
-
-    losses = (
-        results <= 0
     )
 
     trades = len(results)
@@ -1290,106 +1184,306 @@ def performance(results):
 
 
 # ============================================================
-# ROBUSTNESS-FIRST SCORE
+# RECENCY-WEIGHTED PERFORMANCE
 # ============================================================
 
-def candidate_score(p):
+def weighted_training_score(
+    df,
+    results,
+    trade_indices,
+    total_training_candles,
+):
 
     if (
-        p["trades"] <
-        MIN_TRAIN_TRADES
-    ):
-
-        return -999999.0
-
-    if (
-        p["total_r"] <= 0
+        len(results) == 0
+        or len(trade_indices) == 0
     ):
 
         return -999999.0
 
     # --------------------------------------------------------
-    # We deliberately do NOT maximise WR alone.
+    # Map each trade to its position in the training set.
     #
-    # A 95% WR strategy with 20 trades is less useful than
-    # a 74% WR strategy with hundreds of trades and strong R.
+    # The backtest uses one result per selected signal.
+    # trade_indices therefore correspond to the trade result
+    # ordering.
     # --------------------------------------------------------
 
-    win_rate_component = (
-        p["win_rate"] *
-        0.40
+    n = min(
+        len(results),
+        len(trade_indices),
     )
 
-    sample_component = (
+    results = np.asarray(
+        results[:n],
+        dtype=float,
+    )
+
+    positions = np.asarray(
+        trade_indices[:n],
+        dtype=int,
+    )
+
+    if n < MIN_TRAIN_TRADES:
+
+        return -999999.0
+
+    # --------------------------------------------------------
+    # Divide training data into thirds.
+    # --------------------------------------------------------
+
+    old_cut = (
+        total_training_candles *
+        0.333333
+    )
+
+    recent_cut = (
+        total_training_candles *
+        0.666667
+    )
+
+    old_mask = (
+        positions < old_cut
+    )
+
+    mid_mask = (
+        (positions >= old_cut)
+        &
+        (positions < recent_cut)
+    )
+
+    recent_mask = (
+        positions >= recent_cut
+    )
+
+    old_results = (
+        results[old_mask]
+    )
+
+    mid_results = (
+        results[mid_mask]
+    )
+
+    recent_results = (
+        results[recent_mask]
+    )
+
+    # --------------------------------------------------------
+    # Require minimum recent sample.
+    # --------------------------------------------------------
+
+    if (
+        len(recent_results)
+        <
+        MIN_RECENT_TRADES
+    ):
+
+        return -999999.0
+
+    if (
+        len(mid_results)
+        <
+        MIN_SUBPERIOD_TRADES
+    ):
+
+        return -999999.0
+
+    if (
+        len(old_results)
+        <
+        MIN_SUBPERIOD_TRADES
+    ):
+
+        return -999999.0
+
+    old_p = performance(
+        old_results
+    )
+
+    mid_p = performance(
+        mid_results
+    )
+
+    recent_p = performance(
+        recent_results
+    )
+
+    full_p = performance(
+        results
+    )
+
+    # --------------------------------------------------------
+    # We want the recent period to matter most.
+    #
+    # But old and middle periods must remain positive enough
+    # to prevent a strategy from being selected solely because
+    # of a lucky recent window.
+    # --------------------------------------------------------
+
+    weighted_wr = (
+        old_p["win_rate"]
+        * OLD_WEIGHT
+        +
+        mid_p["win_rate"]
+        * MID_WEIGHT
+        +
+        recent_p["win_rate"]
+        * RECENT_WEIGHT
+    )
+
+    weighted_r = (
+        old_p["total_r"]
+        * OLD_WEIGHT
+        +
+        mid_p["total_r"]
+        * MID_WEIGHT
+        +
+        recent_p["total_r"]
+        * RECENT_WEIGHT
+    )
+
+    # --------------------------------------------------------
+    # Stability across eras.
+    # --------------------------------------------------------
+
+    era_penalty = 0.0
+
+    if old_p["total_r"] <= 0:
+
+        era_penalty += 8.0
+
+    if mid_p["total_r"] <= 0:
+
+        era_penalty += 5.0
+
+    if recent_p["total_r"] <= 0:
+
+        era_penalty += 3.0
+
+    # --------------------------------------------------------
+    # Recent WR receives strongest weight.
+    # --------------------------------------------------------
+
+    score = (
+        weighted_wr * 0.50
+        +
+        weighted_r * 0.30
+        +
         min(
-            p["trades"],
+            full_p["trades"],
             500,
         )
-        /
-        500.0
-        *
-        100.0
-        *
-        0.20
-    )
-
-    r_component = (
+        / 500.0
+        * 100.0
+        * 0.10
+        +
         min(
-            p["total_r"],
-            60.0,
-        )
-        /
-        60.0
-        *
-        100.0
-        *
-        0.25
-    )
-
-    pf_component = (
-        min(
-            p["profit_factor"],
+            full_p["profit_factor"],
             2.5,
         )
-        /
-        2.5
-        *
-        100.0
-        *
-        0.10
-    )
-
-    drawdown_penalty = (
-        min(
-            p["max_drawdown"],
-            20.0,
-        )
-        *
-        0.25
-    )
-
-    return (
-        win_rate_component
-        +
-        sample_component
-        +
-        r_component
-        +
-        pf_component
+        / 2.5
+        * 100.0
+        * 0.10
         -
-        drawdown_penalty
+        full_p["max_drawdown"]
+        * 0.20
+        -
+        era_penalty
+    )
+
+    return float(
+        score
     )
 
 
 # ============================================================
-# TRAINING OPTIMISATION
+# EXTRACT TRADE INDICES
+# ============================================================
+
+def get_trade_indices(
+    df,
+    score,
+    hours,
+    threshold,
+):
+
+    atr = (
+        df["atr14"]
+        .to_numpy()
+    )
+
+    hour = (
+        df["time"]
+        .dt.hour
+        .to_numpy()
+    )
+
+    mask = (
+        np.isfinite(score)
+        &
+        np.isfinite(atr)
+        &
+        (atr > 0)
+        &
+        np.isin(
+            hour,
+            hours,
+        )
+        &
+        (
+            np.abs(score)
+            >=
+            abs(threshold)
+        )
+    )
+
+    indices = np.flatnonzero(
+        mask
+    )
+
+    indices = indices[
+        indices < len(df) - 1
+    ]
+
+    if len(indices) == 0:
+
+        return np.empty(
+            0,
+            dtype=np.int64,
+        )
+
+    selected = []
+
+    next_available = -1
+
+    max_hold = 48
+
+    for index in indices:
+
+        if index < next_available:
+
+            continue
+
+        selected.append(
+            index
+        )
+
+        next_available = (
+            index +
+            max_hold
+        )
+
+    return np.asarray(
+        selected,
+        dtype=np.int64,
+    )
+
+
+# ============================================================
+# OPTIMISATION
 # ============================================================
 
 def optimise_training(df):
-
-    # --------------------------------------------------------
-    # Cache signals.
-    # --------------------------------------------------------
 
     signal_cache = {}
 
@@ -1485,8 +1579,30 @@ def optimise_training(df):
             results
         )
 
-        quality = candidate_score(
-            p
+        if (
+            p["trades"]
+            <
+            MIN_TRAIN_TRADES
+        ):
+
+            continue
+
+        trade_indices = (
+            get_trade_indices(
+                df,
+                score,
+                hours,
+                threshold,
+            )
+        )
+
+        quality = (
+            weighted_training_score(
+                df,
+                results,
+                trade_indices,
+                len(df),
+            )
         )
 
         if (
@@ -1511,7 +1627,8 @@ def optimise_training(df):
     )
 
     print(
-        f"VALID CANDIDATES: "
+        f"VALID RECENCY-WEIGHTED "
+        f"CANDIDATES: "
         f"{len(candidates)}",
         flush=True,
     )
@@ -1520,7 +1637,7 @@ def optimise_training(df):
 
 
 # ============================================================
-# PARAMETER STABILITY
+# STABILITY
 # ============================================================
 
 def stability_test(
@@ -1629,7 +1746,6 @@ def stability_test(
         )
     )
 
-    # Keep runtime predictable.
     combinations = combinations[
         :80
     ]
@@ -1665,7 +1781,7 @@ def stability_test(
 
         if (
             p["trades"]
-            >= MIN_STABILITY_TRADES
+            >= MIN_TRAIN_TRADES
         ):
 
             nearby.append(
@@ -1794,18 +1910,6 @@ def select_strategy(df):
 
         return None
 
-    # --------------------------------------------------------
-    # Stability first.
-    #
-    # Then:
-    #   median WR
-    #   median R
-    #   training WR
-    #   training R
-    #
-    # This prevents one lucky training result from dominating.
-    # --------------------------------------------------------
-
     stable_candidates.sort(
         key=lambda x: (
             x[
@@ -1823,16 +1927,7 @@ def select_strategy(df):
             ][
                 "median_r"
             ],
-            x[
-                "performance"
-            ][
-                "win_rate"
-            ],
-            x[
-                "performance"
-            ][
-                "total_r"
-            ],
+            x["quality"],
         ),
         reverse=True,
     )
@@ -1889,10 +1984,12 @@ def run_market(
 
     print()
     print("=" * 60, flush=True)
+
     print(
-        f"{market} V11.6",
+        f"{market} V11.7",
         flush=True,
     )
+
     print("=" * 60, flush=True)
 
     df = load_data(
@@ -2011,9 +2108,11 @@ def run_market(
 
         print()
         print(
-            "SELECTED STRATEGY",
+            "SELECTED RECENCY-WEIGHTED "
+            "STRATEGY",
             flush=True,
         )
+
         print("-" * 60, flush=True)
 
         print(
@@ -2048,7 +2147,7 @@ def run_market(
 
         print()
         print(
-            "TRAINING",
+            "FULL TRAINING",
             flush=True,
         )
 
@@ -2276,10 +2375,6 @@ def main():
                 market
             ] = pd.DataFrame()
 
-    # ========================================================
-    # SUMMARY
-    # ========================================================
-
     summary_rows = []
 
     total_trades = 0
@@ -2451,15 +2546,11 @@ def main():
         else 0.0
     )
 
-    # ========================================================
-    # FINAL OUTPUT
-    # ========================================================
-
     print()
     print("=" * 60, flush=True)
 
     print(
-        "V11.6 FINAL MULTI-MARKET SUMMARY",
+        "V11.7 FINAL MULTI-MARKET SUMMARY",
         flush=True,
     )
 
@@ -2527,15 +2618,11 @@ def main():
         flush=True,
     )
 
-    # ========================================================
-    # TARGET CHECK
-    # ========================================================
-
     print()
     print("=" * 60, flush=True)
 
     print(
-        "V11.6 TARGET CHECK",
+        "V11.7 TARGET CHECK",
         flush=True,
     )
 
@@ -2606,10 +2693,6 @@ def main():
             flush=True,
         )
 
-    # ========================================================
-    # SAFETY
-    # ========================================================
-
     print()
     print("=" * 60, flush=True)
 
@@ -2627,8 +2710,14 @@ def main():
     )
 
     print(
+        "Recent training data receives "
+        "greater optimisation weight.",
+        flush=True,
+    )
+
+    print(
         "Each walk-forward period "
-        "is independently optimised.",
+        "is independently tested.",
         flush=True,
     )
 
@@ -2667,7 +2756,7 @@ def main():
     print("=" * 60, flush=True)
 
     print(
-        "OPTIMIZER V11.6 COMPLETE",
+        "OPTIMIZER V11.7 COMPLETE",
         flush=True,
     )
 
