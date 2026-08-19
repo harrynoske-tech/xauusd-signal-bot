@@ -1,4 +1,4 @@
-name: XAUUSD Strategy Optimizer
+name: Multi-Market Strategy Optimizer
 
 on:
   workflow_dispatch:
@@ -19,12 +19,88 @@ jobs:
 
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install pandas numpy requests dukascopy-python
 
-      - name: Download Dukascopy data
+      - name: Download all market data
         run: |
           python dukascopy_data.py
-          python eurusd_data.py
+
+      - name: Verify downloaded market data
+        run: |
+          python - <<'PY'
+          import os
+          import pandas as pd
+
+          markets = [
+              "XAUUSD",
+              "EURUSD",
+              "GBPUSD",
+              "USDJPY",
+              "AUDUSD",
+              "USDCAD",
+              "USDCHF",
+          ]
+
+          print("=" * 60)
+          print("VERIFYING MARKET DATA")
+          print("=" * 60)
+
+          failed = False
+
+          for market in markets:
+              path = f"data/{market}_15m.csv"
+
+              if not os.path.exists(path):
+                  print(f"FAILED: {path} does not exist")
+                  failed = True
+                  continue
+
+              df = pd.read_csv(path)
+
+              print(
+                  f"{market}: "
+                  f"{len(df):,} candles | "
+                  f"{path}"
+              )
+
+              required = [
+                  "Open",
+                  "High",
+                  "Low",
+                  "Close",
+              ]
+
+              missing = [
+                  column
+                  for column in required
+                  if column not in df.columns
+              ]
+
+              if missing:
+                  print(
+                      f"FAILED: {market} missing "
+                      f"columns: {missing}"
+                  )
+                  failed = True
+
+              if df.empty:
+                  print(
+                      f"FAILED: {market} contains "
+                      f"zero candles"
+                  )
+                  failed = True
+
+          print("=" * 60)
+
+          if failed:
+              raise SystemExit(
+                  "One or more market datasets failed verification."
+              )
+
+          print("ALL 7 MARKETS VERIFIED")
+          print("=" * 60)
+          PY
 
       - name: Run optimizer
         run: |
@@ -33,5 +109,8 @@ jobs:
       - name: Upload optimizer results
         uses: actions/upload-artifact@v4
         with:
-          name: optimizer-results
-          path: data/optimizer_results.csv
+          name: multi-market-optimizer-results
+          path: |
+            data/*_optimizer_v*.csv
+            data/multi_market_optimizer_v*.csv
+          if-no-files-found: warn
