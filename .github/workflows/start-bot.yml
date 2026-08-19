@@ -1,23 +1,62 @@
-name: Start Signal Bot
+name: V11.8 Continuous Live Signal Bot
 
 on:
   workflow_dispatch:
 
 jobs:
-  start-bot:
+  live-signal-bot:
     runs-on: ubuntu-latest
 
+    # GitHub Actions has a maximum job runtime.
+    # The Python process itself is continuous.
+    timeout-minutes: 350
+
     steps:
-      - name: Test Telegram startup message
+
+      # ======================================================
+      # CHECKOUT
+      # ======================================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+
+      # ======================================================
+      # PYTHON
+      # ======================================================
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+
+      # ======================================================
+      # DEPENDENCIES
+      # ======================================================
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy requests dukascopy-python
+
+
+      # ======================================================
+      # DOWNLOAD INITIAL HISTORICAL DATA
+      # ======================================================
+
+      - name: Download initial Dukascopy data
+        run: |
+          python dukascopy_data.py
+
+
+      # ======================================================
+      # START CONTINUOUS LIVE BOT
+      # ======================================================
+
+      - name: Start continuous V11.8 live bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
-        run: >-
-          curl
-          -sS
-          -X POST
-          "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
-          --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}"
-          --data-urlencode "text=🟢 SIGNALS BOT LIVE - V11.8 Multi-Market Signal Bot is online"
-          -w "\nHTTP STATUS: %{http_code}\n"
+        run: |
+          python -u live.py
