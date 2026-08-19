@@ -1,116 +1,89 @@
-name: Multi-Market Strategy Optimizer
+name: V11.8 Telegram Signal Bot
 
 on:
   workflow_dispatch:
 
+  schedule:
+    - cron: "*/15 * * * *"
+
 jobs:
-  run-optimizer:
+
+  signal-bot:
+
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+
+    timeout-minutes: 14
 
     steps:
-      - name: Checkout
+
+      # ======================================================
+      # CHECKOUT
+      # ======================================================
+
+      - name: Checkout repository
         uses: actions/checkout@v4
+
+
+      # ======================================================
+      # PYTHON
+      # ======================================================
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
+
+      # ======================================================
+      # DEPENDENCIES
+      # ======================================================
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install pandas numpy requests dukascopy-python
 
-      - name: Download all market data
+
+      # ======================================================
+      # RESTORE SIGNAL STATE
+      # ======================================================
+
+      - name: Restore signal state
+        uses: actions/cache/restore@v4
+        with:
+          path: data/signal_bot_state.txt
+          key: signal-state-${{ github.run_id }}
+          restore-keys: |
+            signal-state-
+
+
+      # ======================================================
+      # DOWNLOAD FRESH MARKET DATA
+      # ======================================================
+
+      - name: Download market data
         run: |
           python dukascopy_data.py
 
-      - name: Verify downloaded market data
+
+      # ======================================================
+      # RUN SIGNAL BOT
+      # ======================================================
+
+      - name: Run V11.8 signal bot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          python - <<'PY'
-          import os
-          import pandas as pd
+          python signal_bot.py
 
-          markets = [
-              "XAUUSD",
-              "EURUSD",
-              "GBPUSD",
-              "USDJPY",
-              "AUDUSD",
-              "USDCAD",
-              "USDCHF",
-          ]
 
-          print("=" * 60)
-          print("VERIFYING MARKET DATA")
-          print("=" * 60)
+      # ======================================================
+      # SAVE SIGNAL STATE
+      # ======================================================
 
-          failed = False
-
-          for market in markets:
-              path = f"data/{market}_15m.csv"
-
-              if not os.path.exists(path):
-                  print(f"FAILED: {path} does not exist")
-                  failed = True
-                  continue
-
-              df = pd.read_csv(path)
-
-              print(
-                  f"{market}: "
-                  f"{len(df):,} candles | "
-                  f"{path}"
-              )
-
-              required = [
-                  "Open",
-                  "High",
-                  "Low",
-                  "Close",
-              ]
-
-              missing = [
-                  column
-                  for column in required
-                  if column not in df.columns
-              ]
-
-              if missing:
-                  print(
-                      f"FAILED: {market} missing "
-                      f"columns: {missing}"
-                  )
-                  failed = True
-
-              if df.empty:
-                  print(
-                      f"FAILED: {market} contains "
-                      f"zero candles"
-                  )
-                  failed = True
-
-          print("=" * 60)
-
-          if failed:
-              raise SystemExit(
-                  "One or more market datasets failed verification."
-              )
-
-          print("ALL 7 MARKETS VERIFIED")
-          print("=" * 60)
-          PY
-
-      - name: Run optimizer
-        run: |
-          python optimizer.py
-
-      - name: Upload optimizer results
-        uses: actions/upload-artifact@v4
+      - name: Save signal state
+        uses: actions/cache/save@v4
         with:
-          name: multi-market-optimizer-results
-          path: |
-            data/*_optimizer_v*.csv
-            data/multi_market_optimizer_v*.csv
-          if-no-files-found: warn
+          path: data/signal_bot_state.txt
+          key: signal-state-${{ github.run_id }}
