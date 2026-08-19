@@ -7,55 +7,28 @@ on:
     - cron: "*/15 * * * *"
 
 jobs:
-
   signal-bot:
-
     runs-on: ubuntu-latest
-
     timeout-minutes: 14
 
     steps:
 
-      # ======================================================
-      # CHECKOUT
-      # ======================================================
-
       - name: Checkout repository
         uses: actions/checkout@v4
-
-
-      # ======================================================
-      # PYTHON
-      # ======================================================
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-
-      # ======================================================
-      # DEPENDENCIES
-      # ======================================================
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install pandas numpy requests dukascopy-python
 
-
-      # ======================================================
-      # DOWNLOAD FRESH MARKET DATA
-      # ======================================================
-
-      - name: Download market data
+      - name: Download fresh market data
         run: |
           python dukascopy_data.py
-
-
-      # ======================================================
-      # RUN SIGNAL BOT
-      # ======================================================
 
       - name: Run V11.8 signal bot
         env:
@@ -63,55 +36,3 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python signal_bot.py
-
-
-      # ======================================================
-      # BOT STATUS
-      # ======================================================
-
-      - name: Send bot status to Telegram
-        if: success()
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-
-          python - <<'PY'
-          import os
-          import requests
-
-          token = os.environ["TELEGRAM_BOT_TOKEN"]
-          chat_id = os.environ["TELEGRAM_CHAT_ID"]
-
-          message = """🟢 SIGNALS BOT LIVE
-
-V11.8 Multi-Market Signal Bot is online.
-
-Markets:
-• XAUUSD
-• EURUSD
-
-Frequency:
-Every 15 minutes
-
-Execution:
-Manual MT5
-
-Status:
-Monitoring for signals."""
-
-          url = f"https://api.telegram.org/bot{token}/sendMessage"
-
-          response = requests.post(
-              url,
-              json={
-                  "chat_id": chat_id,
-                  "text": message,
-              },
-              timeout=20,
-          )
-
-          response.raise_for_status()
-
-          print("Telegram status message sent.")
-          PY
