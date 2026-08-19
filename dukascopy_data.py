@@ -7,7 +7,7 @@ from dukascopy_python import instruments
 
 
 # ============================================================
-# DUKASCOPY XAUUSD HISTORICAL DATA DOWNLOADER
+# MULTI-MARKET DUKASCOPY HISTORICAL DATA DOWNLOADER
 # ============================================================
 
 OUTPUT_DIR = "data"
@@ -17,21 +17,35 @@ END_DATE = datetime.now()
 
 OFFER_SIDE = dukascopy_python.OFFER_SIDE_BID
 
-XAUUSD = instruments.INSTRUMENT_FX_METALS_XAU_USD
+
+# ============================================================
+# MARKETS
+# ============================================================
+
+MARKETS = {
+    "XAUUSD": instruments.INSTRUMENT_FX_METALS_XAU_USD,
+    "EURUSD": instruments.INSTRUMENT_FX_MAJORS_EUR_USD,
+    "GBPUSD": instruments.INSTRUMENT_FX_MAJORS_GBP_USD,
+    "USDJPY": instruments.INSTRUMENT_FX_MAJORS_USD_JPY,
+    "AUDUSD": instruments.INSTRUMENT_FX_MAJORS_AUD_USD,
+    "USDCAD": instruments.INSTRUMENT_FX_MAJORS_USD_CAD,
+    "USDCHF": instruments.INSTRUMENT_FX_MAJORS_USD_CHF,
+}
 
 
 # ============================================================
-# DOWNLOAD
+# DOWNLOAD ONE MARKET
 # ============================================================
 
-def download_data(interval, filename):
+def download_data(symbol, instrument, interval, filename):
 
     print()
-    print("=" * 60)
+    print("=" * 70)
     print("DOWNLOADING:", filename)
-    print("=" * 60)
+    print("=" * 70)
 
-    print("Instrument: XAU/USD")
+    print("Symbol:", symbol)
+    print("Instrument:", instrument)
     print("Start:", START_DATE)
     print("End:", END_DATE)
     print("Interval:", interval)
@@ -43,7 +57,7 @@ def download_data(interval, filename):
     )
 
     data = dukascopy_python.fetch(
-        XAUUSD,
+        instrument,
         interval,
         OFFER_SIDE,
         START_DATE,
@@ -52,12 +66,12 @@ def download_data(interval, filename):
 
     if data is None:
         raise RuntimeError(
-            "Dukascopy returned None."
+            f"Dukascopy returned None for {symbol}."
         )
 
     if data.empty:
         raise RuntimeError(
-            "Dukascopy returned zero candles."
+            f"Dukascopy returned zero candles for {symbol}."
         )
 
     data = data.copy()
@@ -89,7 +103,7 @@ def download_data(interval, filename):
         if column not in data.columns:
 
             raise RuntimeError(
-                f"Missing column {column}. "
+                f"{symbol}: missing column {column}. "
                 f"Received: {list(data.columns)}"
             )
 
@@ -128,75 +142,148 @@ def download_data(interval, filename):
 def main():
 
     print()
-    print("=" * 60)
-    print("DUKASCOPY XAUUSD DATA DOWNLOADER")
-    print("=" * 60)
+    print("=" * 70)
+    print("MULTI-MARKET DUKASCOPY DATA DOWNLOADER")
+    print("=" * 70)
     print()
 
     print("DATA SOURCE: DUKASCOPY")
-    print("SYMBOL: XAUUSD")
-    print("INSTRUMENT:", XAUUSD)
     print("START:", START_DATE)
     print("END:", END_DATE)
-
-    # --------------------------------------------------------
-    # 15 MINUTE
-    # --------------------------------------------------------
-
-    data_15m = download_data(
-        dukascopy_python.INTERVAL_MIN_15,
-        "XAUUSD_15m.csv",
-    )
-
-    # --------------------------------------------------------
-    # DAILY
-    # --------------------------------------------------------
-
-    data_daily = download_data(
-        dukascopy_python.INTERVAL_DAY_1,
-        "XAUUSD_1d.csv",
-    )
-
-    # --------------------------------------------------------
-    # VERIFY
-    # --------------------------------------------------------
-
-    print()
-    print("=" * 60)
-    print("DOWNLOAD COMPLETE")
-    print("=" * 60)
     print()
 
-    print(
-        "15M CANDLES:",
-        len(data_15m)
-    )
-
-    print(
-        "DAILY CANDLES:",
-        len(data_daily)
-    )
+    print("MARKETS:")
+    for symbol in MARKETS:
+        print(" ", symbol)
 
     print()
 
-    print(
-        "15M:",
-        data_15m.index.min(),
-        "->",
-        data_15m.index.max()
+    os.makedirs(
+        OUTPUT_DIR,
+        exist_ok=True
     )
 
-    print(
-        "DAILY:",
-        data_daily.index.min(),
-        "->",
-        data_daily.index.max()
-    )
+    results = {}
+
+    # ========================================================
+    # DOWNLOAD 15-MINUTE DATA
+    # ========================================================
+
+    for symbol, instrument in MARKETS.items():
+
+        filename = f"{symbol}_15m.csv"
+
+        try:
+
+            results[symbol] = download_data(
+                symbol,
+                instrument,
+                dukascopy_python.INTERVAL_MIN_15,
+                filename,
+            )
+
+        except Exception as error:
+
+            print()
+            print("=" * 70)
+            print("FAILED:", symbol)
+            print("=" * 70)
+            print(
+                type(error).__name__,
+                ":",
+                error
+            )
+
+            raise
+
+    # ========================================================
+    # DOWNLOAD DAILY DATA
+    # ========================================================
 
     print()
-    print("Files created:")
-    print("  data/XAUUSD_15m.csv")
-    print("  data/XAUUSD_1d.csv")
+    print("=" * 70)
+    print("DOWNLOADING DAILY DATA")
+    print("=" * 70)
+
+    daily_results = {}
+
+    for symbol, instrument in MARKETS.items():
+
+        filename = f"{symbol}_1d.csv"
+
+        try:
+
+            daily_results[symbol] = download_data(
+                symbol,
+                instrument,
+                dukascopy_python.INTERVAL_DAY_1,
+                filename,
+            )
+
+        except Exception as error:
+
+            print()
+            print("=" * 70)
+            print("FAILED DAILY:", symbol)
+            print("=" * 70)
+            print(
+                type(error).__name__,
+                ":",
+                error
+            )
+
+            raise
+
+    # ========================================================
+    # FINAL VERIFICATION
+    # ========================================================
+
+    print()
+    print("=" * 70)
+    print("MULTI-MARKET DOWNLOAD COMPLETE")
+    print("=" * 70)
+    print()
+
+    print("15-MINUTE FILES:")
+
+    for symbol, data in results.items():
+
+        print(
+            f"  {symbol}: "
+            f"{len(data):,} candles | "
+            f"{data.index.min()} -> "
+            f"{data.index.max()}"
+        )
+
+    print()
+
+    print("DAILY FILES:")
+
+    for symbol, data in daily_results.items():
+
+        print(
+            f"  {symbol}: "
+            f"{len(data):,} candles | "
+            f"{data.index.min()} -> "
+            f"{data.index.max()}"
+        )
+
+    print()
+
+    print("FILES CREATED:")
+
+    for symbol in MARKETS:
+
+        print(
+            f"  data/{symbol}_15m.csv"
+        )
+
+        print(
+            f"  data/{symbol}_1d.csv"
+        )
+
+    print()
+    print("ALL MARKETS DOWNLOADED SUCCESSFULLY.")
     print()
 
 
