@@ -1,6 +1,5 @@
 import os
 import time
-import threading
 from datetime import datetime, timezone
 
 import numpy as np
@@ -9,138 +8,50 @@ import requests
 
 
 # ============================================================
-# V11.8 CONTINUOUS DUKASCOPY LIVE SIGNAL BOT
-# ============================================================
-#
-# XAUUSD + EURUSD
-#
-# STARTUP:
-#   1. Load historical data for context/backscan
-#   2. Build indicators
-#   3. Connect to Dukascopy current prices
-#
-# LIVE:
-#   - Poll Dukascopy current prices every second
-#   - Maintain the current 15-minute candle in memory
-#   - Continuously analyse the developing candle
-#   - Send pre-signals when a setup is developing
-#   - Confirm signals when the 15m candle closes
-#   - Use the CURRENT live price for the actual entry
-#
-# TELEGRAM:
-#   /dash
-#   /status
-#   /report
-#
-# TRADING:
-#   NO MT5 CONNECTION
-#   NO AUTOMATIC TRADING
-#   SIGNALS ONLY
-#
-# The process intentionally does not terminate.
-# ============================================================
-
-
-# ============================================================
-# CONFIGURATION
+# V11.8 CONTINUOUS LIVE SIGNAL BOT
 # ============================================================
 
 DATA_DIR = "data"
 
-TELEGRAM_BOT_TOKEN = os.getenv(
-    "TELEGRAM_BOT_TOKEN"
-)
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-TELEGRAM_CHAT_ID = os.getenv(
-    "TELEGRAM_CHAT_ID"
-)
+PRICE_INTERVAL = 1
+HEARTBEAT_INTERVAL = 60
 
-DUKASCOPY_BASE = (
-    "https://freeserv.dukascopy.com/2.0/"
-)
-
-PRICE_INTERVAL_SECONDS = 1
-
-HEARTBEAT_SECONDS = 60
-
-BACKSCAN_CANDLES = 5000
-
-MAX_CANDLES_IN_MEMORY = 5000
-
-PRE_SIGNAL_COOLDOWN_SECONDS = 300
-
-
-# ============================================================
-# MARKETS
-# ============================================================
+MAX_CANDLES = 5000
 
 MARKETS = {
-
     "XAUUSD": {
-
         "instrument": "xauusd",
-
-        "display": "XAUUSD",
-
-        "file": (
-            "data/XAUUSD_15m.csv"
-        ),
-
+        "file": "data/XAUUSD_15m.csv",
         "rr": 0.35,
-
         "wick": 0.20,
-
         "body": 0.15,
-
         "separation": 0.00040,
-
         "threshold": -0.25,
-
         "hours": (3, 4),
-
     },
 
     "EURUSD": {
-
         "instrument": "eurusd",
-
-        "display": "EURUSD",
-
-        "file": (
-            "data/EURUSD_15m.csv"
-        ),
-
+        "file": "data/EURUSD_15m.csv",
         "rr": 0.35,
-
         "wick": 0.20,
-
         "body": 0.15,
-
         "separation": 0.00050,
-
         "threshold": 0.00,
-
         "hours": (3, 4, 5),
-
     },
 }
 
 
-# ============================================================
-# RUNTIME STATE
-# ============================================================
-
 market_data = {}
-
 market_quotes = {}
 
-market_state = {}
-
-telegram_offset = None
-
-state_lock = threading.Lock()
-
-running = True
+last_signal = {}
+last_presignal = {}
+last_heartbeat = 0
 
 
 # ============================================================
@@ -148,13 +59,10 @@ running = True
 # ============================================================
 
 def utc_now():
-
-    return datetime.now(
-        timezone.utc
-    )
+    return datetime.now(timezone.utc)
 
 
-def current_bucket():
+def current_15m_bucket():
 
     now = utc_now()
 
@@ -166,7 +74,7 @@ def current_bucket():
     return now.replace(
         minute=minute,
         second=0,
-        microsecond=0
+        microsecond=0,
     )
 
 
@@ -177,13 +85,9 @@ def current_bucket():
 def log(message):
 
     print(
-        "["
-        + utc_now().strftime(
-            "%Y-%m-%d %H:%M:%S UTC"
-        )
-        + "] "
-        + str(message),
-        flush=True
+        f"[{utc_now().strftime('%Y-%m-%d %H:%M:%S UTC')}] "
+        f"{message}",
+        flush=True,
     )
 
 
@@ -195,7 +99,7 @@ def telegram_url(method):
 
     return (
         "https://api.telegram.org/bot"
-        + TELEGRAM_BOT_TOKEN
+        + str(TELEGRAM_BOT_TOKEN)
         + "/"
         + method
     )
@@ -206,8 +110,7 @@ def send_telegram(message):
     if not TELEGRAM_BOT_TOKEN:
 
         log(
-            "ERROR: "
-            "TELEGRAM_BOT_TOKEN missing."
+            "ERROR: TELEGRAM_BOT_TOKEN is missing."
         )
 
         return False
@@ -215,8 +118,7 @@ def send_telegram(message):
     if not TELEGRAM_CHAT_ID:
 
         log(
-            "ERROR: "
-            "TELEGRAM_CHAT_ID missing."
+            "ERROR: TELEGRAM_CHAT_ID is missing."
         )
 
         return False
@@ -225,16 +127,11 @@ def send_telegram(message):
 
         response = requests.post(
 
-            telegram_url(
-                "sendMessage"
-            ),
+            telegram_url("sendMessage"),
 
             json={
-                "chat_id":
-                    TELEGRAM_CHAT_ID,
-
-                "text":
-                    message,
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": message,
             },
 
             timeout=10,
@@ -258,13 +155,16 @@ def send_telegram(message):
 # TELEGRAM COMMANDS
 # ============================================================
 
-def get_telegram_updates():
+telegram_offset = None
+
+
+def process_commands():
 
     global telegram_offset
 
     if not TELEGRAM_BOT_TOKEN:
 
-        return []
+        return
 
     try:
 
@@ -274,15 +174,11 @@ def get_telegram_updates():
 
         if telegram_offset is not None:
 
-            params["offset"] = (
-                telegram_offset
-            )
+            params["offset"] = telegram_offset
 
         response = requests.get(
 
-            telegram_url(
-                "getUpdates"
-            ),
+            telegram_url("getUpdates"),
 
             params=params,
 
@@ -291,19 +187,78 @@ def get_telegram_updates():
 
         response.raise_for_status()
 
-        return response.json().get(
+        updates = response.json().get(
             "result",
-            []
+            [],
         )
+
+        for update in updates:
+
+            update_id = update.get(
+                "update_id"
+            )
+
+            if update_id is not None:
+
+                telegram_offset = (
+                    update_id + 1
+                )
+
+            message = update.get(
+                "message"
+            )
+
+            if not message:
+
+                continue
+
+            chat_id = str(
+                message.get(
+                    "chat",
+                    {},
+                ).get(
+                    "id",
+                    "",
+                )
+            )
+
+            if chat_id != str(
+                TELEGRAM_CHAT_ID
+            ):
+
+                continue
+
+            text = str(
+                message.get(
+                    "text",
+                    "",
+                )
+            ).strip().lower()
+
+            if text in (
+                "/dash",
+                "/status",
+            ):
+
+                send_telegram(
+                    build_status()
+                )
+
+            elif text in (
+                "/report",
+                "/market",
+            ):
+
+                send_telegram(
+                    build_report()
+                )
 
     except Exception as error:
 
         log(
-            "TELEGRAM UPDATE ERROR: "
+            "COMMAND ERROR: "
             + str(error)
         )
-
-        return []
 
 
 # ============================================================
@@ -319,198 +274,149 @@ def decimals(market):
     return 5
 
 
-def fmt_price(
+def format_price(
     market,
-    value
+    value,
 ):
 
-    return (
-        f"{float(value):."
-        f"{decimals(market)}f}"
+    return format(
+        float(value),
+        f".{decimals(market)}f",
     )
 
 
 # ============================================================
-# DUKASCOPY CURRENT PRICE
+# DUKASCOPY LIVE PRICE
 # ============================================================
 
 def get_current_prices():
 
-    response = requests.get(
-
-        DUKASCOPY_BASE,
-
-        params={
-            "path": "api/currentPrices",
-
-            "instruments":
-                "xauusd,eurusd",
-        },
-
-        timeout=10,
-    )
-
-    response.raise_for_status()
-
-    data = response.json()
-
-    if isinstance(
-        data,
-        dict
-    ):
-
-        if "data" in data:
-
-            data = data["data"]
-
-        elif "result" in data:
-
-            data = data["result"]
-
-    if not isinstance(
-        data,
-        list
-    ):
-
-        raise RuntimeError(
-            "Unexpected Dukascopy "
-            "currentPrices response."
-        )
-
     prices = {}
 
-    for item in data:
+    for market, config in MARKETS.items():
 
-        if not isinstance(
-            item,
-            dict
-        ):
+        try:
 
-            continue
+            response = requests.get(
 
-        raw_symbol = str(
+                "https://freeserv.dukascopy.com/2.0/",
 
-            item.get(
-                "instrument",
-                item.get(
-                    "symbol",
-                    item.get(
-                        "name",
-                        ""
-                    )
+                params={
+                    "path": "api/currentPrices",
+                    "instruments":
+                        config["instrument"],
+                },
+
+                timeout=10,
+            )
+
+            response.raise_for_status()
+
+            payload = response.json()
+
+            if isinstance(
+                payload,
+                dict,
+            ):
+
+                if "data" in payload:
+
+                    payload = payload["data"]
+
+                elif "result" in payload:
+
+                    payload = payload["result"]
+
+            if not isinstance(
+                payload,
+                list,
+            ):
+
+                continue
+
+            for item in payload:
+
+                if not isinstance(
+                    item,
+                    dict,
+                ):
+
+                    continue
+
+                bid = item.get(
+                    "bid"
                 )
-            )
-        ).upper()
 
-        symbol = (
-            raw_symbol
-            .replace(
-                "/",
-                ""
-            )
-            .replace(
-                "_",
-                ""
-            )
-            .replace(
-                "-",
-                ""
-            )
-        )
+                ask = item.get(
+                    "ask"
+                )
 
-        if symbol == "XAUUSD":
+                if bid is None:
 
-            market = "XAUUSD"
+                    bid = item.get(
+                        "bidPrice"
+                    )
 
-        elif symbol == "EURUSD":
+                if ask is None:
 
-            market = "EURUSD"
+                    ask = item.get(
+                        "askPrice"
+                    )
 
-        else:
+                if bid is None:
 
-            continue
+                    continue
 
-        bid = (
-            item.get("bid")
-            if item.get("bid")
-            is not None
+                if ask is None:
 
-            else item.get(
-                "bidPrice"
-            )
-        )
+                    ask = bid
 
-        ask = (
-            item.get("ask")
-            if item.get("ask")
-            is not None
+                bid = float(bid)
+                ask = float(ask)
 
-            else item.get(
-                "askPrice"
-            )
-        )
+                if bid <= 0 or ask <= 0:
 
-        if bid is None:
+                    continue
 
-            bid = item.get(
-                "Bid"
+                prices[market] = {
+
+                    "bid": bid,
+
+                    "ask": ask,
+
+                    "mid": (
+                        bid + ask
+                    ) / 2.0,
+
+                    "time": utc_now(),
+                }
+
+                break
+
+        except Exception as error:
+
+            log(
+                f"{market} PRICE ERROR: "
+                + str(error)
             )
 
-        if ask is None:
+    if len(prices) != len(MARKETS):
 
-            ask = item.get(
-                "Ask"
+        missing = [
+
+            market
+
+            for market in MARKETS
+
+            if market not in prices
+        ]
+
+        if missing:
+
+            log(
+                "Missing live prices: "
+                + ", ".join(missing)
             )
-
-        if bid is None:
-
-            continue
-
-        if ask is None:
-
-            ask = bid
-
-        bid = float(bid)
-
-        ask = float(ask)
-
-        if bid <= 0:
-
-            continue
-
-        if ask <= 0:
-
-            continue
-
-        prices[market] = {
-
-            "bid": bid,
-
-            "ask": ask,
-
-            "mid": (
-                bid + ask
-            ) / 2.0,
-
-            "time": utc_now(),
-
-        }
-
-    missing = [
-
-        market
-
-        for market in MARKETS
-
-        if market not in prices
-    ]
-
-    if missing:
-
-        raise RuntimeError(
-            "Dukascopy did not return "
-            + ", ".join(missing)
-        )
 
     return prices
 
@@ -519,9 +425,9 @@ def get_current_prices():
 # HISTORICAL DATA
 # ============================================================
 
-def load_csv_history(
+def load_history(
     market,
-    config
+    config,
 ):
 
     path = config["file"]
@@ -530,22 +436,17 @@ def load_csv_history(
 
         raise RuntimeError(
             f"{market}: "
-            f"{path} not found."
+            f"{path} does not exist."
         )
 
-    df = pd.read_csv(
-        path
-    )
+    df = pd.read_csv(path)
 
     df.columns = [
 
         str(column)
         .strip()
         .lower()
-        .replace(
-            " ",
-            "_"
-        )
+        .replace(" ", "_")
 
         for column in df.columns
     ]
@@ -562,7 +463,6 @@ def load_csv_history(
         if candidate in df.columns:
 
             time_column = candidate
-
             break
 
     if time_column is None:
@@ -572,14 +472,12 @@ def load_csv_history(
             "no timestamp column."
         )
 
-    required = [
+    for column in (
         "open",
         "high",
         "low",
         "close",
-    ]
-
-    for column in required:
+    ):
 
         if column not in df.columns:
 
@@ -590,341 +488,64 @@ def load_csv_history(
 
         df[column] = pd.to_numeric(
             df[column],
-            errors="coerce"
+            errors="coerce",
         )
 
     df["time"] = pd.to_datetime(
-
         df[time_column],
-
         utc=True,
-
-        errors="coerce"
+        errors="coerce",
     )
 
     df = df.dropna(
-
         subset=[
             "time",
-            *required,
+            "open",
+            "high",
+            "low",
+            "close",
         ]
     )
 
     df = (
-
         df
-
-        .sort_values(
-            "time"
-        )
-
-        .drop_duplicates(
-            subset="time"
-        )
-
-        .reset_index(
-            drop=True
-        )
+        .sort_values("time")
+        .drop_duplicates("time")
+        .reset_index(drop=True)
     )
-
-    return df
-
-
-def try_dukascopy_history(
-    market,
-    config
-):
-
-    try:
-
-        response = requests.get(
-
-            DUKASCOPY_BASE,
-
-            params={
-
-                "path":
-                    "api/historicalPrices",
-
-                "instrument":
-                    config["instrument"],
-
-                "timeFrame":
-                    "15m",
-
-                "count":
-                    BACKSCAN_CANDLES,
-
-                "offerSide":
-                    "B",
-
-            },
-
-            timeout=20,
-        )
-
-        response.raise_for_status()
-
-        payload = response.json()
-
-        if isinstance(
-            payload,
-            dict
-        ):
-
-            if "data" in payload:
-
-                payload = payload["data"]
-
-            elif "result" in payload:
-
-                payload = payload["result"]
-
-        if not isinstance(
-            payload,
-            list
-        ):
-
-            return None
-
-        rows = []
-
-        for item in payload:
-
-            if not isinstance(
-                item,
-                dict
-            ):
-
-                continue
-
-            timestamp = (
-
-                item.get("time")
-
-                if item.get("time")
-                is not None
-
-                else item.get(
-                    "timestamp"
-                )
-            )
-
-            if timestamp is None:
-
-                continue
-
-            if isinstance(
-                timestamp,
-                str
-            ):
-
-                parsed_time = pd.to_datetime(
-                    timestamp,
-                    utc=True,
-                    errors="coerce"
-                )
-
-            else:
-
-                timestamp = float(
-                    timestamp
-                )
-
-                if timestamp < 10_000_000_000:
-
-                    timestamp *= 1000
-
-                parsed_time = pd.to_datetime(
-
-                    timestamp,
-
-                    unit="ms",
-
-                    utc=True,
-
-                    errors="coerce"
-                )
-
-            if pd.isna(
-                parsed_time
-            ):
-
-                continue
-
-            open_price = item.get(
-                "open"
-            )
-
-            high = item.get(
-                "high"
-            )
-
-            low = item.get(
-                "low"
-            )
-
-            close = item.get(
-                "close"
-            )
-
-            if None in (
-                open_price,
-                high,
-                low,
-                close,
-            ):
-
-                continue
-
-            rows.append({
-
-                "time":
-                    parsed_time,
-
-                "open":
-                    float(open_price),
-
-                "high":
-                    float(high),
-
-                "low":
-                    float(low),
-
-                "close":
-                    float(close),
-
-            })
-
-        if not rows:
-
-            return None
-
-        df = pd.DataFrame(
-            rows
-        )
-
-        df = (
-
-            df
-
-            .sort_values(
-                "time"
-            )
-
-            .drop_duplicates(
-                subset="time"
-            )
-
-            .reset_index(
-                drop=True
-            )
-        )
-
-        return df
-
-    except Exception as error:
-
-        log(
-            f"{market}: "
-            "Dukascopy historical API "
-            "refresh failed: "
-            + str(error)
-        )
-
-        return None
-
-
-def build_startup_history(
-    market,
-    config
-):
-
-    log(
-        f"{market}: loading startup "
-        "historical context..."
-    )
-
-    local_df = load_csv_history(
-        market,
-        config
-    )
-
-    live_history = (
-        try_dukascopy_history(
-            market,
-            config
-        )
-    )
-
-    if (
-        live_history is not None
-        and len(live_history) >= 100
-    ):
-
-        log(
-            f"{market}: using "
-            "fresh Dukascopy historical "
-            f"data ({len(live_history)} candles)."
-        )
-
-        df = live_history
-
-    else:
-
-        log(
-            f"{market}: using local "
-            f"historical data ({len(local_df)} candles)."
-        )
-
-        df = local_df
 
     return df.tail(
-        MAX_CANDLES_IN_MEMORY
-    ).reset_index(
-        drop=True
-    )
+        MAX_CANDLES
+    ).copy()
 
 
 # ============================================================
-# LIVE CANDLE MANAGEMENT
+# LIVE CANDLE
 # ============================================================
 
-def ensure_current_candle(
+def update_live_candle(
     market,
-    price
+    price,
 ):
 
-    df = market_data[
-        market
-    ]
+    bucket = current_15m_bucket()
 
-    bucket = current_bucket()
+    df = market_data[market]
 
     if len(df) == 0:
 
-        candle = pd.DataFrame({
+        market_data[market] = pd.DataFrame({
 
-            "time":
-                [bucket],
+            "time": [bucket],
 
-            "open":
-                [price],
+            "open": [price],
 
-            "high":
-                [price],
+            "high": [price],
 
-            "low":
-                [price],
+            "low": [price],
 
-            "close":
-                [price],
-
+            "close": [price],
         })
-
-        market_data[
-            market
-        ] = candle
 
         return
 
@@ -932,88 +553,89 @@ def ensure_current_candle(
         df.iloc[-1]["time"]
     )
 
-    latest_time = latest_time.tz_convert(
-        "UTC"
-    )
+    if latest_time.tzinfo is None:
+
+        latest_time = latest_time.tz_localize(
+            "UTC"
+        )
+
+    else:
+
+        latest_time = latest_time.tz_convert(
+            "UTC"
+        )
+
+    if latest_time == bucket:
+
+        index = df.index[-1]
+
+        df.at[
+            index,
+            "close"
+        ] = price
+
+        df.at[
+            index,
+            "high"
+        ] = max(
+            float(
+                df.at[
+                    index,
+                    "high"
+                ]
+            ),
+            price,
+        )
+
+        df.at[
+            index,
+            "low"
+        ] = min(
+            float(
+                df.at[
+                    index,
+                    "low"
+                ]
+            ),
+            price,
+        )
+
+        return
 
     if latest_time > bucket:
 
         return
 
-    if latest_time == bucket:
+    new_row = pd.DataFrame({
 
-        idx = df.index[-1]
+        "time": [bucket],
 
-        df.at[
-            idx,
-            "close"
-        ] = price
+        "open": [price],
 
-        df.at[
-            idx,
-            "high"
-        ] = max(
+        "high": [price],
 
-            float(
-                df.at[
-                    idx,
-                    "high"
-                ]
-            ),
+        "low": [price],
 
-            price
-        )
-
-        df.at[
-            idx,
-            "low"
-        ] = min(
-
-            float(
-                df.at[
-                    idx,
-                    "low"
-                ]
-            ),
-
-            price
-        )
-
-        return
-
-    candle = pd.DataFrame({
-
-        "time":
-            [bucket],
-
-        "open":
-            [price],
-
-        "high":
-            [price],
-
-        "low":
-            [price],
-
-        "close":
-            [price],
-
+        "close": [price],
     })
 
-    market_data[
-        market
-    ] = pd.concat(
+    market_data[market] = (
 
-        [
-            df,
-            candle,
-        ],
+        pd.concat(
+            [
+                df,
+                new_row,
+            ],
+            ignore_index=True,
+        )
 
-        ignore_index=True
-    ).tail(
-        MAX_CANDLES_IN_MEMORY
-    ).reset_index(
-        drop=True
+        .tail(
+            MAX_CANDLES
+        )
+
+        .reset_index(
+            drop=True
+        )
     )
 
 
@@ -1023,15 +645,15 @@ def ensure_current_candle(
 
 def prepare_indicators(df):
 
-    df = df.copy()
+    result = df.copy()
 
-    high = df["high"]
+    high = result["high"]
 
-    low = df["low"]
+    low = result["low"]
 
-    open_price = df["open"]
+    open_price = result["open"]
 
-    close = df["close"]
+    close = result["close"]
 
     candle_range = (
         high - low
@@ -1041,16 +663,16 @@ def prepare_indicators(df):
         close - open_price
     ).abs()
 
-    df["body_ratio"] = np.where(
+    result["body_ratio"] = np.where(
 
         candle_range > 0,
 
         body / candle_range,
 
-        np.nan
+        np.nan,
     )
 
-    df["upper_wick"] = np.where(
+    result["upper_wick"] = np.where(
 
         candle_range > 0,
 
@@ -1058,28 +680,28 @@ def prepare_indicators(df):
             high
             - np.maximum(
                 open_price,
-                close
+                close,
             )
         )
         / candle_range,
 
-        np.nan
+        np.nan,
     )
 
-    df["lower_wick"] = np.where(
+    result["lower_wick"] = np.where(
 
         candle_range > 0,
 
         (
             np.minimum(
                 open_price,
-                close
+                close,
             )
             - low
         )
         / candle_range,
 
-        np.nan
+        np.nan,
     )
 
     previous_close = (
@@ -1089,7 +711,6 @@ def prepare_indicators(df):
     true_range = pd.concat(
 
         [
-
             high - low,
 
             (
@@ -1101,52 +722,48 @@ def prepare_indicators(df):
                 low
                 - previous_close
             ).abs(),
-
         ],
 
-        axis=1
+        axis=1,
+    ).max(axis=1)
 
-    ).max(
-        axis=1
-    )
-
-    df["atr14"] = (
+    result["atr14"] = (
 
         true_range
 
         .rolling(
             14,
-            min_periods=14
+            min_periods=14,
         )
 
         .mean()
     )
 
-    df["ema20"] = (
+    result["ema20"] = (
 
         close
 
         .ewm(
             span=20,
-            adjust=False
+            adjust=False,
         )
 
         .mean()
     )
 
-    df["ema50"] = (
+    result["ema50"] = (
 
         close
 
         .ewm(
             span=50,
-            adjust=False
+            adjust=False,
         )
 
         .mean()
     )
 
-    df["momentum5"] = (
+    result["momentum5"] = (
 
         close
         / close.shift(5)
@@ -1159,7 +776,7 @@ def prepare_indicators(df):
 
         .rolling(
             20,
-            min_periods=20
+            min_periods=20,
         )
 
         .max()
@@ -1171,7 +788,7 @@ def prepare_indicators(df):
 
         .rolling(
             20,
-            min_periods=20
+            min_periods=20,
         )
 
         .min()
@@ -1181,7 +798,7 @@ def prepare_indicators(df):
         high20 - low20
     )
 
-    df["range_position"] = np.where(
+    result["range_position"] = np.where(
 
         range20 > 0,
 
@@ -1190,10 +807,10 @@ def prepare_indicators(df):
         )
         / range20,
 
-        np.nan
+        np.nan,
     )
 
-    return df
+    return result
 
 
 # ============================================================
@@ -1202,7 +819,7 @@ def prepare_indicators(df):
 
 def calculate_score(
     row,
-    config
+    config,
 ):
 
     if pd.isna(
@@ -1345,31 +962,27 @@ def calculate_score(
 # DEVELOPING SETUP
 # ============================================================
 
-def get_developing_setup(
-    market
+def developing_setup(
+    market,
 ):
 
-    config = MARKETS[
-        market
-    ]
+    config = MARKETS[market]
 
-    df = market_data[
-        market
-    ]
+    df = market_data[market]
 
     if len(df) < 100:
 
         return None
 
-    live_df = prepare_indicators(
+    prepared = prepare_indicators(
         df
     )
 
-    row = live_df.iloc[-1]
+    row = prepared.iloc[-1]
 
     score = calculate_score(
         row,
-        config
+        config,
     )
 
     if score is None:
@@ -1390,19 +1003,11 @@ def get_developing_setup(
 
     return {
 
-        "direction":
-            direction,
+        "direction": direction,
 
-        "score":
-            score,
+        "score": score,
 
-        "candle_time":
-            row["time"],
-
-        "atr":
-            float(
-                row["atr14"]
-            ),
+        "candle_time": row["time"],
 
     }
 
@@ -1411,18 +1016,14 @@ def get_developing_setup(
 # CONFIRMED SIGNAL
 # ============================================================
 
-def get_confirmed_signal(
+def confirmed_signal(
     market,
-    live_price
+    live_price,
 ):
 
-    config = MARKETS[
-        market
-    ]
+    config = MARKETS[market]
 
-    df = market_data[
-        market
-    ]
+    df = market_data[market]
 
     if len(df) < 100:
 
@@ -1436,35 +1037,28 @@ def get_confirmed_signal(
 
         return None
 
-    candle = prepared.iloc[-2]
+    row = prepared.iloc[-2]
 
-    candle_time = (
-        pd.Timestamp(
-            candle["time"]
-        )
-        .to_pydatetime()
+    candle_time = pd.Timestamp(
+        row["time"]
     )
 
-    if (
-        candle_time.hour
-        not in config["hours"]
+    if candle_time.hour not in (
+        config["hours"]
     ):
 
         return None
 
     score = calculate_score(
-        candle,
-        config
+        row,
+        config,
     )
 
     if score is None:
 
         return None
 
-    if (
-        score
-        < config["threshold"]
-    ):
+    if score < config["threshold"]:
 
         return None
 
@@ -1478,7 +1072,7 @@ def get_confirmed_signal(
     )
 
     atr = float(
-        candle["atr14"]
+        row["atr14"]
     )
 
     if atr <= 0:
@@ -1489,78 +1083,58 @@ def get_confirmed_signal(
         live_price
     )
 
-    rr = config[
-        "rr"
-    ]
+    rr = config["rr"]
 
     if direction == "BUY":
 
-        sl = (
-            entry - atr
-        )
+        sl = entry - atr
 
-        tp = (
-            entry
-            + atr * rr
+        tp = entry + (
+            atr * rr
         )
 
     else:
 
-        sl = (
-            entry + atr
-        )
+        sl = entry + atr
 
-        tp = (
-            entry
-            - atr * rr
+        tp = entry - (
+            atr * rr
         )
 
     return {
 
-        "market":
-            market,
+        "market": market,
 
-        "direction":
-            direction,
+        "direction": direction,
 
-        "entry":
-            entry,
+        "entry": entry,
 
-        "sl":
-            sl,
+        "sl": sl,
 
-        "tp":
-            tp,
+        "tp": tp,
 
-        "rr":
-            rr,
+        "rr": rr,
 
-        "score":
-            score,
+        "score": score,
 
-        "signal_time":
-            candle_time,
+        "signal_time": candle_time,
 
     }
 
 
 # ============================================================
-# PRE-SIGNAL MESSAGE
+# MESSAGES
 # ============================================================
 
-def make_presignal_message(
+def presignal_message(
     market,
     setup,
-    price
+    price,
 ):
-
-    direction = setup[
-        "direction"
-    ]
 
     emoji = (
         "🟡"
-        if direction == "BUY"
+        if setup["direction"] == "BUY"
         else "🟠"
     )
 
@@ -1568,43 +1142,32 @@ def make_presignal_message(
 
         f"{emoji} V11.8 SETUP DEVELOPING\n\n"
 
-        f"{market} {direction}\n\n"
+        f"{market} "
+        f"{setup['direction']}\n\n"
 
         f"Current price: "
-        f"{fmt_price(market, price)}\n"
+        f"{format_price(market, price)}\n"
 
         f"Live score: "
         f"{setup['score']:.2f}\n\n"
 
-        "Conditions are developing "
-        "toward a potential V11.8 signal.\n\n"
+        "Potential V11.8 setup developing.\n\n"
 
         "DO NOT ENTER YET.\n"
 
-        "Prepare MT5 and wait for "
-        "confirmation."
+        "Prepare MT5 and wait for confirmation."
     )
 
 
-# ============================================================
-# CONFIRMED MESSAGE
-# ============================================================
-
-def make_signal_message(
-    signal
+def signal_message(
+    signal,
 ):
 
-    market = signal[
-        "market"
-    ]
-
-    direction = signal[
-        "direction"
-    ]
+    market = signal["market"]
 
     emoji = (
         "🟢"
-        if direction == "BUY"
+        if signal["direction"] == "BUY"
         else "🔴"
     )
 
@@ -1612,16 +1175,17 @@ def make_signal_message(
 
         f"{emoji} V11.8 SIGNAL CONFIRMED\n\n"
 
-        f"{market} {direction}\n\n"
+        f"{market} "
+        f"{signal['direction']}\n\n"
 
         f"Entry: "
-        f"{fmt_price(market, signal['entry'])}\n"
+        f"{format_price(market, signal['entry'])}\n"
 
         f"SL: "
-        f"{fmt_price(market, signal['sl'])}\n"
+        f"{format_price(market, signal['sl'])}\n"
 
         f"TP: "
-        f"{fmt_price(market, signal['tp'])}\n\n"
+        f"{format_price(market, signal['tp'])}\n\n"
 
         f"RR: "
         f"{signal['rr']:.2f}\n"
@@ -1639,14 +1203,14 @@ def make_signal_message(
 
 
 # ============================================================
-# STATUS / DASH
+# DASH
 # ============================================================
 
-def make_status():
+def build_status():
 
     lines = [
 
-        "🟢 V11.8 SIGNALS BOT",
+        "🟢 V11.8 SIGNAL BOT",
 
         "",
 
@@ -1657,16 +1221,11 @@ def make_status():
         "DATA: DUKASCOPY",
 
         "",
-
     ]
 
     for market in MARKETS:
 
         quote = market_quotes.get(
-            market
-        )
-
-        df = market_data.get(
             market
         )
 
@@ -1678,37 +1237,10 @@ def make_status():
 
             continue
 
-        price = quote[
-            "mid"
-        ]
-
-        if df is not None:
-
-            candle = df.iloc[-1]
-
-            candle_time = (
-                pd.Timestamp(
-                    candle["time"]
-                )
-                .strftime(
-                    "%H:%M UTC"
-                )
-            )
-
-        else:
-
-            candle_time = "N/A"
-
         lines.append(
 
             f"{market}: "
-            f"{fmt_price(market, price)}"
-        )
-
-        lines.append(
-
-            f"  15m candle: "
-            f"{candle_time}"
+            f"{format_price(market, quote['mid'])}"
         )
 
     return "\n".join(
@@ -1716,9 +1248,9 @@ def make_status():
     )
 
 
-def make_report():
+def build_report():
 
-    report = [
+    lines = [
 
         "📊 V11.8 MARKET REPORT",
 
@@ -1729,7 +1261,6 @@ def make_report():
         "Data source: Dukascopy",
 
         "",
-
     ]
 
     for market in MARKETS:
@@ -1738,175 +1269,51 @@ def make_report():
             market
         )
 
-        df = market_data.get(
+        if quote is None:
+
+            lines.append(
+                f"{market}: unavailable"
+            )
+
+            lines.append("")
+
+            continue
+
+        lines.append(
+            f"{market}: "
+            f"{format_price(market, quote['mid'])}"
+        )
+
+        setup = developing_setup(
             market
         )
 
-        report.append(
-            f"{market}"
-        )
+        if setup:
 
-        if quote is None:
+            lines.append(
 
-            report.append(
-                "Price: unavailable"
+                "Setup: "
+                + setup["direction"]
+                + " developing"
             )
 
-            report.append("")
+            lines.append(
 
-            continue
-
-        report.append(
-
-            "Price: "
-            + fmt_price(
-                market,
-                quote["mid"]
-            )
-        )
-
-        if df is not None:
-
-            prepared = (
-                prepare_indicators(
-                    df
-                )
+                f"Score: "
+                f"{setup['score']:.2f}"
             )
 
-            if len(prepared) >= 100:
+        else:
 
-                row = prepared.iloc[-1]
+            lines.append(
+                "Setup: none"
+            )
 
-                score = calculate_score(
-
-                    row,
-
-                    MARKETS[market]
-                )
-
-                if score is not None:
-
-                    if score >= 0.75:
-
-                        setup = "BUY developing"
-
-                    elif score <= -0.75:
-
-                        setup = "SELL developing"
-
-                    else:
-
-                        setup = "No active setup"
-
-                    report.append(
-                        "Setup: "
-                        + setup
-                    )
-
-                    report.append(
-
-                        "Score: "
-                        + f"{score:.2f}"
-                    )
-
-        report.append("")
+        lines.append("")
 
     return "\n".join(
-        report
+        lines
     )
-
-
-# ============================================================
-# TELEGRAM COMMAND PROCESSOR
-# ============================================================
-
-def process_telegram_commands():
-
-    global telegram_offset
-
-    updates = (
-        get_telegram_updates()
-    )
-
-    for update in updates:
-
-        update_id = update.get(
-            "update_id"
-        )
-
-        if update_id is not None:
-
-            telegram_offset = (
-                update_id + 1
-            )
-
-        message = update.get(
-            "message"
-        )
-
-        if not message:
-
-            continue
-
-        chat = message.get(
-            "chat",
-            {}
-        )
-
-        chat_id = str(
-            chat.get(
-                "id",
-                ""
-            )
-        )
-
-        if (
-            chat_id
-            != str(
-                TELEGRAM_CHAT_ID
-            )
-        ):
-
-            continue
-
-        text = str(
-            message.get(
-                "text",
-                ""
-            )
-        ).strip().lower()
-
-        if text in (
-            "/dash",
-            "/status",
-        ):
-
-            send_telegram(
-                make_status()
-            )
-
-        elif text in (
-            "/report",
-            "/market",
-        ):
-
-            send_telegram(
-                make_report()
-            )
-
-        elif text == "/start":
-
-            send_telegram(
-
-                "🟢 V11.8 SIGNAL BOT\n\n"
-
-                "Continuous monitoring active.\n\n"
-
-                "Commands:\n"
-                "/dash\n"
-                "/report\n"
-                "/status"
-            )
 
 
 # ============================================================
@@ -1915,18 +1322,14 @@ def process_telegram_commands():
 
 def startup():
 
-    log(
-        "=" * 60
-    )
+    log("=" * 60)
 
     log(
         "V11.8 CONTINUOUS "
-        "DUKASCOPY SIGNAL BOT"
+        "LIVE SIGNAL BOT"
     )
 
-    log(
-        "=" * 60
-    )
+    log("=" * 60)
 
     log(
         "SIGNALS ONLY"
@@ -1941,49 +1344,38 @@ def startup():
     )
 
     log(
-        "LIVE DATA: DUKASCOPY"
+        "DUKASCOPY LIVE PRICE"
     )
 
     log(
-        "CHECK: EVERY 1 SECOND"
+        "1 SECOND MONITORING"
     )
 
-    log(
-        "=" * 60
-    )
+    log("=" * 60)
 
-    for market, config in (
-        MARKETS.items()
-    ):
+    for market, config in MARKETS.items():
+
+        log(
+            f"{market}: loading "
+            "historical context..."
+        )
+
+        df = load_history(
+            market,
+            config,
+        )
 
         market_data[
             market
-        ] = build_startup_history(
-            market,
-            config
+        ] = df
+
+        log(
+
+            f"{market}: "
+            f"{len(df)} candles loaded."
         )
 
-        market_state[
-            market
-        ] = {
-
-            "last_candle":
-                None,
-
-            "last_signal":
-                None,
-
-            "last_presignal":
-                None,
-
-            "last_presignal_time":
-                0,
-
-        }
-
-    prices = (
-        get_current_prices()
-    )
+    prices = get_current_prices()
 
     market_quotes.update(
         prices
@@ -1991,20 +1383,25 @@ def startup():
 
     for market in MARKETS:
 
-        price = prices[
+        quote = prices.get(
             market
-        ]["mid"]
+        )
 
-        ensure_current_candle(
+        if quote is None:
+
+            continue
+
+        update_live_candle(
+
             market,
-            price
+
+            quote["mid"],
         )
 
         log(
 
-            f"{market}: "
-            f"live price "
-            f"{fmt_price(market, price)}"
+            f"{market}: LIVE PRICE "
+            f"{format_price(market, quote['mid'])}"
         )
 
     log(
@@ -2026,20 +1423,21 @@ def startup():
         "• XAUUSD\n"
         "• EURUSD\n\n"
 
-        "Live Dukascopy monitoring:\n"
-        "Every second\n\n"
+        "Live Dukascopy monitoring active.\n"
 
         "Manual MT5 execution."
     )
 
 
 # ============================================================
-# LIVE LOOP
+# MAIN LOOP
 # ============================================================
 
-def live_loop():
+def main():
 
-    last_heartbeat = 0
+    global last_heartbeat
+
+    startup()
 
     while True:
 
@@ -2047,11 +1445,9 @@ def live_loop():
 
         try:
 
-            prices = (
-                get_current_prices()
-            )
+            prices = get_current_prices()
 
-            with state_lock:
+            if prices:
 
                 market_quotes.update(
                     prices
@@ -2059,89 +1455,73 @@ def live_loop():
 
             for market in MARKETS:
 
-                price = prices[
+                quote = prices.get(
                     market
-                ]["mid"]
+                )
+
+                if quote is None:
+
+                    continue
+
+                price = quote["mid"]
 
                 previous_bucket = (
-                    current_bucket()
+                    current_15m_bucket()
                 )
 
-                ensure_current_candle(
+                previous_last = (
+                    market_data[market].iloc[-1]["time"]
+                )
+
+                update_live_candle(
                     market,
-                    price
+                    price,
+                )
+
+                current_last = (
+                    market_data[market].iloc[-1]["time"]
                 )
 
                 # --------------------------------------------
-                # DEVELOPING SETUP
+                # PRE-SIGNAL
                 # --------------------------------------------
 
-                setup = (
-                    get_developing_setup(
-                        market
-                    )
+                setup = developing_setup(
+                    market
                 )
 
                 if setup is not None:
 
-                    state = market_state[
-                        market
-                    ]
-
-                    candle_id = str(
-                        setup[
-                            "candle_time"
-                        ]
-                    )
-
                     setup_id = (
 
-                        candle_id
+                        str(
+                            setup["candle_time"]
+                        )
+
                         + "|"
+
                         + setup["direction"]
                     )
 
-                    now = time.time()
-
                     if (
-
-                        state[
-                            "last_presignal"
-                        ]
-                        != setup_id
-
-                        and (
-
-                            now
-                            - state[
-                                "last_presignal_time"
-                            ]
-
-                            >=
-                            PRE_SIGNAL_COOLDOWN_SECONDS
+                        last_presignal.get(
+                            market
                         )
-
+                        != setup_id
                     ):
 
-                        message = (
-                            make_presignal_message(
+                        if send_telegram(
+
+                            presignal_message(
                                 market,
                                 setup,
-                                price
+                                price,
                             )
-                        )
-
-                        if send_telegram(
-                            message
                         ):
 
-                            state[
-                                "last_presignal"
+                            last_presignal[
+                                market
                             ] = setup_id
-
-                            state[
-                                "last_presignal_time"
-                            ] = now
 
                             log(
                                 f"{market}: "
@@ -2149,99 +1529,127 @@ def live_loop():
                             )
 
                 # --------------------------------------------
-                # CHECK FOR NEW COMPLETED CANDLE
+                # NEW 15M CANDLE
                 # --------------------------------------------
-
-                df = market_data[
-                    market
-                ]
-
-                if len(df) < 2:
-
-                    continue
-
-                completed_time = (
-                    pd.Timestamp(
-                        df.iloc[-2]["time"]
-                    )
-                )
-
-                state = market_state[
-                    market
-                ]
-
-                completed_id = str(
-                    completed_time
-                )
 
                 if (
-                    state[
-                        "last_candle"
-                    ]
-                    == completed_id
+                    current_last
+                    != previous_last
                 ):
 
-                    continue
-
-                state[
-                    "last_candle"
-                ] = completed_id
-
-                # --------------------------------------------
-                # CONFIRMED SIGNAL
-                # --------------------------------------------
-
-                signal = (
-                    get_confirmed_signal(
+                    signal = confirmed_signal(
                         market,
-                        price
+                        price,
+                    )
+
+                    if signal is not None:
+
+                        signal_id = (
+
+                            str(
+                                signal[
+                                    "signal_time"
+                                ]
+                            )
+
+                            + "|"
+
+                            + signal[
+                                "direction"
+                            ]
+                        )
+
+                        if (
+                            last_signal.get(
+                                market
+                            )
+                            != signal_id
+                        ):
+
+                            if send_telegram(
+
+                                signal_message(
+                                    signal
+                                )
+                            ):
+
+                                last_signal[
+                                    market
+                                ] = signal_id
+
+                                log(
+                                    f"{market}: "
+                                    "CONFIRMED SIGNAL SENT"
+                                )
+
+                    else:
+
+                        log(
+
+                            f"{market}: "
+                            "new 15m candle - "
+                            "no confirmed signal."
+                        )
+
+            # --------------------------------------------
+            # TELEGRAM COMMANDS
+            # --------------------------------------------
+
+            process_commands()
+
+            # --------------------------------------------
+            # HEARTBEAT
+            # --------------------------------------------
+
+            now = time.time()
+
+            if (
+                now
+                - last_heartbeat
+                >= HEARTBEAT_INTERVAL
+            ):
+
+                prices_text = []
+
+                for market in MARKETS:
+
+                    quote = market_quotes.get(
+                        market
+                    )
+
+                    if quote:
+
+                        prices_text.append(
+
+                            f"{market}="
+                            f"{format_price("
+                                market,
+                                quote["mid"]
+                            )}"
+                        )
+
+                log(
+
+                    "HEARTBEAT | BOT RUNNING | "
+                    + " | ".join(
+                        prices_text
                     )
                 )
 
-                if signal is None:
+                last_heartbeat = now
 
-                    log(
-                        f"{market}: "
-                        "15m candle closed - "
-                        "no confirmed signal."
-                    )
+            elapsed = (
+                time.time()
+                - loop_start
+            )
 
-                    continue
-
-                signal_id = (
-
-                    completed_id
-                    + "|"
-                    + signal["direction"]
+            time.sleep(
+                max(
+                    0.1,
+                    PRICE_INTERVAL
+                    - elapsed,
                 )
-
-                if (
-                    state[
-                        "last_signal"
-                    ]
-                    == signal_id
-                ):
-
-                    continue
-
-                message = (
-                    make_signal_message(
-                        signal
-                    )
-                )
-
-                if send_telegram(
-                    message
-                ):
-
-                    state[
-                        "last_signal"
-                    ] = signal_id
-
-                    log(
-                        f"{market}: "
-                        "CONFIRMED SIGNAL SENT."
-                    )
+            )
 
         except Exception as error:
 
@@ -2252,92 +1660,12 @@ def live_loop():
                 + str(error)
             )
 
-        # --------------------------------------------
-        # TELEGRAM COMMANDS
-        # --------------------------------------------
-
-        try:
-
-            process_telegram_commands()
-
-        except Exception as error:
-
-            log(
-                "COMMAND ERROR: "
-                + str(error)
-            )
-
-        # --------------------------------------------
-        # HEARTBEAT
-        # --------------------------------------------
-
-        now = time.time()
-
-        if (
-            now
-            - last_heartbeat
-            >= HEARTBEAT_SECONDS
-        ):
-
-            log(
-                "HEARTBEAT | "
-                "BOT RUNNING | "
-                "XAUUSD="
-                + (
-                    fmt_price(
-                        "XAUUSD",
-                        market_quotes[
-                            "XAUUSD"
-                        ]["mid"]
-                    )
-                    if "XAUUSD"
-                    in market_quotes
-                    else "N/A"
-                )
-                + " | EURUSD="
-                + (
-                    fmt_price(
-                        "EURUSD",
-                        market_quotes[
-                            "EURUSD"
-                        ]["mid"]
-                    )
-                    if "EURUSD"
-                    in market_quotes
-                    else "N/A"
-                )
-            )
-
-            last_heartbeat = now
-
-        elapsed = (
-            time.time()
-            - loop_start
-        )
-
-        sleep_time = max(
-
-            0.1,
-
-            PRICE_INTERVAL_SECONDS
-            - elapsed
-        )
-
-        time.sleep(
-            sleep_time
-        )
+            time.sleep(2)
 
 
 # ============================================================
-# MAIN
+# RUN
 # ============================================================
-
-def main():
-
-    startup()
-
-    live_loop()
-
 
 if __name__ == "__main__":
 
