@@ -1,4 +1,4 @@
-name: V11.8 Telegram Signal Bot
+name: V11.8 Multi-Market Signal Bot
 
 on:
   workflow_dispatch:
@@ -45,19 +45,6 @@ jobs:
 
 
       # ======================================================
-      # RESTORE SIGNAL STATE
-      # ======================================================
-
-      - name: Restore signal state
-        uses: actions/cache/restore@v4
-        with:
-          path: data/signal_bot_state.txt
-          key: signal-state-${{ github.run_id }}
-          restore-keys: |
-            signal-state-
-
-
-      # ======================================================
       # DOWNLOAD FRESH MARKET DATA
       # ======================================================
 
@@ -79,11 +66,52 @@ jobs:
 
 
       # ======================================================
-      # SAVE SIGNAL STATE
+      # BOT STATUS
       # ======================================================
 
-      - name: Save signal state
-        uses: actions/cache/save@v4
-        with:
-          path: data/signal_bot_state.txt
-          key: signal-state-${{ github.run_id }}
+      - name: Send bot status to Telegram
+        if: success()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+
+          python - <<'PY'
+          import os
+          import requests
+
+          token = os.environ["TELEGRAM_BOT_TOKEN"]
+          chat_id = os.environ["TELEGRAM_CHAT_ID"]
+
+          message = """🟢 SIGNALS BOT LIVE
+
+V11.8 Multi-Market Signal Bot is online.
+
+Markets:
+• XAUUSD
+• EURUSD
+
+Frequency:
+Every 15 minutes
+
+Execution:
+Manual MT5
+
+Status:
+Monitoring for signals."""
+
+          url = f"https://api.telegram.org/bot{token}/sendMessage"
+
+          response = requests.post(
+              url,
+              json={
+                  "chat_id": chat_id,
+                  "text": message,
+              },
+              timeout=20,
+          )
+
+          response.raise_for_status()
+
+          print("Telegram status message sent.")
+          PY
