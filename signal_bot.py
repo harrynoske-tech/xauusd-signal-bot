@@ -1,4 +1,5 @@
 import os
+import time
 from datetime import datetime, timezone
 
 import numpy as np
@@ -7,23 +8,24 @@ import requests
 
 
 # ============================================================
-# V11.8 MULTI-MARKET TELEGRAM SIGNAL BOT
+# V11.8 CONTINUOUS MULTI-MARKET TELEGRAM SIGNAL BOT
 # ============================================================
 #
 # SIGNALS ONLY
 # MANUAL MT5 EXECUTION
 # NO AUTOMATIC TRADING
 #
-# ENABLED:
+# Markets:
 #   XAUUSD
 #   EURUSD
 #
-# DISABLED UNTIL VALIDATED:
-#   GBPUSD
-#   USDJPY
-#   AUDUSD
-#   USDCAD
-#   USDCHF
+# The bot stays running continuously.
+#
+# Historical CSV data is loaded once.
+# The bot checks for new completed 15-minute candles.
+#
+# IMPORTANT:
+# This version does NOT place MT5 trades.
 # ============================================================
 
 
@@ -41,22 +43,33 @@ TELEGRAM_CHAT_ID = os.getenv(
     "TELEGRAM_CHAT_ID"
 )
 
-STATE_FILE = os.path.join(
-    DATA_DIR,
-    "signal_bot_state.txt"
-)
+# How often the bot checks whether a new candle is available.
+CHECK_INTERVAL_SECONDS = 10
+
+# How often the CSV data is refreshed.
+#
+# This is deliberately much longer than the checking interval.
+# We do NOT redownload the data every 10 seconds.
+#
+DATA_REFRESH_SECONDS = 60
+
+# Minimum seconds between repeated pre-signal messages.
+PRE_SIGNAL_COOLDOWN = 300
 
 
 # ============================================================
-# V11.8 MARKET PARAMETERS
+# MARKET CONFIGURATION
 # ============================================================
 
 MARKETS = {
 
     "XAUUSD": {
+
         "file": "data/XAUUSD_15m.csv",
+
         "enabled": True,
 
+        # V11.8 XAUUSD baseline
         "rr": 0.35,
         "wick": 0.20,
         "body": 0.15,
@@ -66,9 +79,12 @@ MARKETS = {
     },
 
     "EURUSD": {
+
         "file": "data/EURUSD_15m.csv",
+
         "enabled": True,
 
+        # V11.8 EURUSD baseline
         "rr": 0.35,
         "wick": 0.20,
         "body": 0.15,
@@ -77,6 +93,7 @@ MARKETS = {
         "hours": (3, 4, 5),
     },
 
+    # Not enabled yet.
     "GBPUSD": {
         "enabled": False,
     },
@@ -103,32 +120,57 @@ MARKETS = {
 # STATE
 # ============================================================
 
-def load_state():
+STATE_FILE = os.path.join(
+    DATA_DIR,
+    "continuous_signal_state.csv"
+)
 
-    if not os.path.exists(STATE_FILE):
-        return {}
+
+def utc_now():
+    return datetime.now(
+        timezone.utc
+    )
+
+
+def load_state():
 
     state = {}
 
-    with open(
-        STATE_FILE,
-        "r",
-        encoding="utf-8"
-    ) as file:
+    if not os.path.exists(
+        STATE_FILE
+    ):
+        return state
 
-        for line in file:
+    try:
 
-            line = line.strip()
+        df = pd.read_csv(
+            STATE_FILE
+        )
 
-            if not line:
-                continue
+        for _, row in df.iterrows():
 
-            parts = line.split("|", 1)
+            market = str(
+                row["market"]
+            )
 
-            if len(parts) != 2:
-                continue
+            state[market] = {
+                "last_candle": str(
+                    row["last_candle"]
+                ),
+                "last_signal": str(
+                    row["last_signal"]
+                ),
+                "last_presignal": str(
+                    row["last_presignal"]
+                ),
+            }
 
-            state[parts[0]] = parts[1]
+    except Exception as error:
+
+        print(
+            "STATE LOAD ERROR:",
+            error
+        )
 
     return state
 
@@ -140,17 +182,37 @@ def save_state(state):
         exist_ok=True
     )
 
-    with open(
-        STATE_FILE,
-        "w",
-        encoding="utf-8"
-    ) as file:
+    rows = []
 
-        for market, signal_id in state.items():
+    for market, values in state.items():
 
-            file.write(
-                f"{market}|{signal_id}\n"
-            )
+        rows.append({
+            "market": market,
+            "last_candle":
+                values.get(
+                    "last_candle",
+                    ""
+                ),
+            "last_signal":
+                values.get(
+                    "last_signal",
+                    ""
+                ),
+            "last_presignal":
+                values.get(
+                    "last_presignal",
+                    ""
+                ),
+        })
+
+    if rows:
+
+        pd.DataFrame(
+            rows
+        ).to_csv(
+            STATE_FILE,
+            index=False
+        )
 
 
 # ============================================================
@@ -160,13 +222,17 @@ def save_state(state):
 def send_telegram(message):
 
     if not TELEGRAM_BOT_TOKEN:
+
         raise RuntimeError(
-            "TELEGRAM_BOT_TOKEN is not configured."
+            "TELEGRAM_BOT_TOKEN "
+            "is not configured."
         )
 
     if not TELEGRAM_CHAT_ID:
+
         raise RuntimeError(
-            "TELEGRAM_CHAT_ID is not configured."
+            "TELEGRAM_CHAT_ID "
+            "is not configured."
         )
 
     url = (
@@ -175,11 +241,17 @@ def send_telegram(message):
     )
 
     response = requests.post(
+
         url,
+
         json={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message,
+            "chat_id":
+                TELEGRAM_CHAT_ID,
+
+            "text":
+                message,
         },
+
         timeout=20,
     )
 
@@ -190,35 +262,35 @@ def send_telegram(message):
 # DATA LOADING
 # ============================================================
 
-def load_data(market, config):
+def load_data(
+    market,
+    config
+):
 
     path = config["file"]
 
     if not os.path.exists(path):
 
-        print(
+        raise RuntimeError(
             f"{market}: missing {path}"
         )
 
-        return None
-
-    df = pd.read_csv(path)
-
-    # --------------------------------------------------------
-    # NORMALISE COLUMN NAMES
-    # --------------------------------------------------------
+    df = pd.read_csv(
+        path
+    )
 
     df.columns = [
+
         str(column)
         .strip()
         .lower()
-        .replace(" ", "_")
+        .replace(
+            " ",
+            "_"
+        )
+
         for column in df.columns
     ]
-
-    # --------------------------------------------------------
-    # FIND TIME COLUMN
-    # --------------------------------------------------------
 
     time_column = None
 
@@ -232,23 +304,24 @@ def load_data(market, config):
         if candidate in df.columns:
 
             time_column = candidate
+
             break
 
     if time_column is None:
 
         raise RuntimeError(
-            f"{market}: no datetime column found."
+            f"{market}: "
+            "No datetime column."
         )
 
     df["time"] = pd.to_datetime(
+
         df[time_column],
+
         utc=True,
+
         errors="coerce",
     )
-
-    # --------------------------------------------------------
-    # REQUIRED COLUMNS
-    # --------------------------------------------------------
 
     required = [
         "open",
@@ -258,33 +331,32 @@ def load_data(market, config):
     ]
 
     missing = [
+
         column
+
         for column in required
+
         if column not in df.columns
     ]
 
     if missing:
 
         raise RuntimeError(
-            f"{market}: missing columns {missing}"
+            f"{market}: missing "
+            f"columns {missing}"
         )
-
-    # --------------------------------------------------------
-    # NUMERIC
-    # --------------------------------------------------------
 
     for column in required:
 
         df[column] = pd.to_numeric(
+
             df[column],
-            errors="coerce",
+
+            errors="coerce"
         )
 
-    # --------------------------------------------------------
-    # CLEAN
-    # --------------------------------------------------------
-
     df = df.dropna(
+
         subset=[
             "time",
             *required,
@@ -292,12 +364,20 @@ def load_data(market, config):
     )
 
     df = (
+
         df
-        .sort_values("time")
+
+        .sort_values(
+            "time"
+        )
+
         .drop_duplicates(
             subset="time"
         )
-        .reset_index(drop=True)
+
+        .reset_index(
+            drop=True
+        )
     )
 
     return df
@@ -312,62 +392,70 @@ def prepare_indicators(df):
     df = df.copy()
 
     high = df["high"]
+
     low = df["low"]
+
     open_price = df["open"]
+
     close = df["close"]
 
-    # --------------------------------------------------------
-    # CANDLE RANGE
-    # --------------------------------------------------------
-
-    candle_range = high - low
+    candle_range = (
+        high - low
+    )
 
     body = (
         close - open_price
     ).abs()
 
     df["body_ratio"] = np.where(
+
         candle_range > 0,
+
         body / candle_range,
+
         np.nan,
     )
 
-    # --------------------------------------------------------
-    # WICKS
-    # --------------------------------------------------------
-
     df["upper_wick"] = np.where(
+
         candle_range > 0,
+
         (
             high
             - np.maximum(
                 open_price,
                 close,
             )
-        ) / candle_range,
+        )
+        / candle_range,
+
         np.nan,
     )
 
     df["lower_wick"] = np.where(
+
         candle_range > 0,
+
         (
             np.minimum(
                 open_price,
                 close,
             )
             - low
-        ) / candle_range,
+        )
+        / candle_range,
+
         np.nan,
     )
 
-    # --------------------------------------------------------
-    # ATR 14
-    # --------------------------------------------------------
-
-    previous_close = close.shift(1)
+    previous_close = (
+        close.shift(1)
+    )
 
     true_range = pd.concat(
+
         [
+
             high - low,
 
             (
@@ -379,84 +467,95 @@ def prepare_indicators(df):
                 low
                 - previous_close
             ).abs(),
+
         ],
+
         axis=1,
-    ).max(axis=1)
+
+    ).max(
+        axis=1
+    )
 
     df["atr14"] = (
+
         true_range
+
         .rolling(
             14,
-            min_periods=14,
+            min_periods=14
         )
+
         .mean()
     )
-
-    # --------------------------------------------------------
-    # EMA 20
-    # --------------------------------------------------------
 
     df["ema20"] = (
+
         close
+
         .ewm(
             span=20,
-            adjust=False,
+            adjust=False
         )
+
         .mean()
     )
-
-    # --------------------------------------------------------
-    # EMA 50
-    # --------------------------------------------------------
 
     df["ema50"] = (
+
         close
+
         .ewm(
             span=50,
-            adjust=False,
+            adjust=False
         )
+
         .mean()
     )
 
-    # --------------------------------------------------------
-    # MOMENTUM
-    # --------------------------------------------------------
-
     df["momentum5"] = (
+
         close
         / close.shift(5)
         - 1.0
     )
 
-    # --------------------------------------------------------
-    # RANGE POSITION
-    # --------------------------------------------------------
-
     high20 = (
+
         high
+
         .rolling(
             20,
-            min_periods=20,
+            min_periods=20
         )
+
         .max()
     )
 
     low20 = (
+
         low
+
         .rolling(
             20,
-            min_periods=20,
+            min_periods=20
         )
+
         .min()
     )
 
-    range20 = high20 - low20
+    range20 = (
+        high20 - low20
+    )
 
     df["range_position"] = np.where(
+
         range20 > 0,
+
         (
             close - low20
-        ) / range20,
+        )
+        / range20,
+
         np.nan,
     )
 
@@ -464,33 +563,23 @@ def prepare_indicators(df):
 
 
 # ============================================================
-# V11.8 SIGNAL
+# V11.8 SCORE
 # ============================================================
 
-def calculate_signal(row, config):
+def calculate_score(
+    row,
+    config
+):
 
-    # --------------------------------------------------------
-    # VALIDATION
-    # --------------------------------------------------------
+    if pd.isna(
+        row["atr14"]
+    ):
 
-    if pd.isna(row["atr14"]):
         return None
 
     if row["atr14"] <= 0:
-        return None
 
-    if pd.isna(row["body_ratio"]):
         return None
-
-    if pd.isna(row["range_position"]):
-        return None
-
-    if pd.isna(row["momentum5"]):
-        return None
-
-    # --------------------------------------------------------
-    # SCORE
-    # --------------------------------------------------------
 
     score = 0.0
 
@@ -504,9 +593,7 @@ def calculate_signal(row, config):
         < row["open"]
     )
 
-    # --------------------------------------------------------
-    # WICK / REJECTION
-    # --------------------------------------------------------
+    # Rejection / wick
 
     if (
         row["lower_wick"]
@@ -522,9 +609,7 @@ def calculate_signal(row, config):
 
         score -= 1.0
 
-    # --------------------------------------------------------
-    # BODY
-    # --------------------------------------------------------
+    # Small body
 
     if (
         row["body_ratio"]
@@ -533,9 +618,7 @@ def calculate_signal(row, config):
 
         score += 0.50
 
-    # --------------------------------------------------------
-    # DIRECTION
-    # --------------------------------------------------------
+    # Candle direction
 
     if bullish:
 
@@ -545,49 +628,53 @@ def calculate_signal(row, config):
 
         score -= 0.25
 
-    # --------------------------------------------------------
-    # RANGE LOCATION
-    # --------------------------------------------------------
+    # Range location
 
     if (
+
         bullish
-        and
-        row["range_position"] <= 0.35
+
+        and row["range_position"]
+        <= 0.35
+
     ):
 
         score += 0.50
 
     if (
+
         bearish
-        and
-        row["range_position"] >= 0.65
+
+        and row["range_position"]
+        >= 0.65
+
     ):
 
         score -= 0.50
 
-    # --------------------------------------------------------
-    # MOMENTUM
-    # --------------------------------------------------------
+    # Momentum
 
     if (
+
         bullish
-        and
-        row["momentum5"] > 0
+
+        and row["momentum5"] > 0
+
     ):
 
         score += 0.25
 
     elif (
+
         bearish
-        and
-        row["momentum5"] < 0
+
+        and row["momentum5"] < 0
+
     ):
 
         score -= 0.25
 
-    # --------------------------------------------------------
-    # EMA STRUCTURE
-    # --------------------------------------------------------
+    # EMA structure
 
     if (
         row["ema20"]
@@ -603,15 +690,15 @@ def calculate_signal(row, config):
 
         score -= 0.10
 
-    # --------------------------------------------------------
-    # EMA SEPARATION
-    # --------------------------------------------------------
+    # EMA separation
 
     separation = (
+
         abs(
             row["ema20"]
             - row["ema50"]
         )
+
         / row["atr14"]
     )
 
@@ -631,78 +718,57 @@ def calculate_signal(row, config):
 
             score -= 0.10
 
-    # --------------------------------------------------------
-    # THRESHOLD
-    # --------------------------------------------------------
-
-    if score < config["threshold"]:
-        return None
-
-    # --------------------------------------------------------
-    # DIRECTION
-    # --------------------------------------------------------
-
-    if score >= 0:
-
-        direction = "BUY"
-
-    else:
-
-        direction = "SELL"
-
-    return {
-        "direction": direction,
-        "score": float(score),
-        "atr": float(row["atr14"]),
-    }
+    return float(score)
 
 
 # ============================================================
-# PRICE FORMATTING
+# PRICE FORMAT
 # ============================================================
 
 def decimals(market):
 
     if market == "XAUUSD":
+
         return 2
 
     if market == "USDJPY":
+
         return 3
 
     return 5
 
 
-def format_price(market, value):
+def format_price(
+    market,
+    value
+):
 
-    places = decimals(market)
-
-    return f"{value:.{places}f}"
+    return (
+        f"{value:.{decimals(market)}f}"
+    )
 
 
 # ============================================================
-# BUILD TRADE SIGNAL
+# CONFIRMED SIGNAL
 # ============================================================
 
-def build_signal(
+def build_confirmed_signal(
     market,
     df,
-    config,
+    config
 ):
 
     if len(df) < 100:
+
         return None
 
-    # --------------------------------------------------------
-    # LAST COMPLETED CANDLE
-    # --------------------------------------------------------
-
+    # Last completed candle.
     candle = df.iloc[-2]
 
-    candle_time = candle["time"]
+    # Current/new candle.
+    current = df.iloc[-1]
 
-    # --------------------------------------------------------
-    # SESSION FILTER
-    # --------------------------------------------------------
+    candle_time = candle["time"]
 
     if (
         candle_time.hour
@@ -711,37 +777,46 @@ def build_signal(
 
         return None
 
-    # --------------------------------------------------------
-    # SIGNAL
-    # --------------------------------------------------------
-
-    result = calculate_signal(
+    score = calculate_score(
         candle,
-        config,
+        config
     )
 
-    if result is None:
+    if score is None:
+
         return None
 
-    # --------------------------------------------------------
-    # NEXT CANDLE OPEN
-    # --------------------------------------------------------
+    if (
+        score
+        < config["threshold"]
+    ):
 
-    entry = float(
-        df.iloc[-1]["open"]
+        return None
+
+    direction = (
+
+        "BUY"
+
+        if score >= 0
+
+        else "SELL"
     )
 
-    atr = result["atr"]
+    entry = float(
+        current["open"]
+    )
+
+    atr = float(
+        candle["atr14"]
+    )
 
     rr = config["rr"]
 
-    # --------------------------------------------------------
-    # SL / TP
-    # --------------------------------------------------------
+    if direction == "BUY":
 
-    if result["direction"] == "BUY":
-
-        sl = entry - atr
+        sl = (
+            entry - atr
+        )
 
         tp = (
             entry
@@ -750,7 +825,9 @@ def build_signal(
 
     else:
 
-        sl = entry + atr
+        sl = (
+            entry + atr
+        )
 
         tp = (
             entry
@@ -758,199 +835,449 @@ def build_signal(
         )
 
     return {
-        "market": market,
-        "direction": result["direction"],
-        "entry": entry,
-        "sl": sl,
-        "tp": tp,
-        "rr": rr,
-        "score": result["score"],
-        "signal_time": candle_time,
+
+        "market":
+            market,
+
+        "direction":
+            direction,
+
+        "entry":
+            entry,
+
+        "sl":
+            sl,
+
+        "tp":
+            tp,
+
+        "rr":
+            rr,
+
+        "score":
+            score,
+
+        "signal_time":
+            candle_time,
     }
 
 
 # ============================================================
-# TELEGRAM MESSAGE
+# PRE-SIGNAL
 # ============================================================
 
-def signal_message(signal):
+def build_presignal(
+    market,
+    df,
+    config
+):
 
-    market = signal["market"]
-    direction = signal["direction"]
+    if len(df) < 100:
 
-    if direction == "BUY":
-        emoji = "🟢"
+        return None
+
+    # Current candle.
+
+    row = df.iloc[-1]
+
+    score = calculate_score(
+        row,
+        config
+    )
+
+    if score is None:
+
+        return None
+
+    # We deliberately require
+    # a meaningful amount of
+    # directional score before
+    # sending a preparation alert.
+
+    if score >= 0.75:
+
+        direction = "BUY"
+
+    elif score <= -0.75:
+
+        direction = "SELL"
+
     else:
-        emoji = "🔴"
 
-    entry = format_price(
-        market,
-        signal["entry"],
+        return None
+
+    current_price = float(
+        row["close"]
     )
 
-    sl = format_price(
-        market,
-        signal["sl"],
+    return {
+
+        "market":
+            market,
+
+        "direction":
+            direction,
+
+        "price":
+            current_price,
+
+        "score":
+            score,
+
+        "candle_time":
+            row["time"],
+    }
+
+
+# ============================================================
+# TELEGRAM MESSAGES
+# ============================================================
+
+def presignal_message(
+    signal
+):
+
+    market = signal[
+        "market"
+    ]
+
+    direction = signal[
+        "direction"
+    ]
+
+    emoji = (
+        "🟡"
+        if direction == "BUY"
+        else "🟠"
     )
 
-    tp = format_price(
+    price = format_price(
         market,
-        signal["tp"],
+        signal["price"]
     )
 
-    signal_time = (
-        signal["signal_time"]
+    candle_time = (
+
+        signal["candle_time"]
+
         .strftime(
             "%Y-%m-%d %H:%M UTC"
         )
     )
 
     return (
-        f"{emoji} V11.8 SIGNAL\n\n"
+
+        f"{emoji} V11.8 SETUP DEVELOPING\n\n"
+
         f"{market} {direction}\n\n"
+
+        f"Current price: {price}\n"
+
+        f"Score: "
+        f"{signal['score']:.2f}\n\n"
+
+        "Conditions are developing "
+        "toward a potential V11.8 signal.\n\n"
+
+        "DO NOT ENTER YET.\n"
+
+        "Prepare MT5 and wait for "
+        "the confirmed signal.\n\n"
+
+        f"Current candle:\n"
+        f"{candle_time}"
+    )
+
+
+def confirmed_message(
+    signal
+):
+
+    market = signal[
+        "market"
+    ]
+
+    direction = signal[
+        "direction"
+    ]
+
+    emoji = (
+        "🟢"
+        if direction == "BUY"
+        else "🔴"
+    )
+
+    entry = format_price(
+        market,
+        signal["entry"]
+    )
+
+    sl = format_price(
+        market,
+        signal["sl"]
+    )
+
+    tp = format_price(
+        market,
+        signal["tp"]
+    )
+
+    signal_time = (
+
+        signal["signal_time"]
+
+        .strftime(
+            "%Y-%m-%d %H:%M UTC"
+        )
+    )
+
+    return (
+
+        f"{emoji} V11.8 SIGNAL CONFIRMED\n\n"
+
+        f"{market} {direction}\n\n"
+
         f"Entry: {entry}\n"
         f"SL: {sl}\n"
         f"TP: {tp}\n\n"
-        f"RR: {signal['rr']:.2f}\n"
-        f"Score: {signal['score']:.2f}\n\n"
+
+        f"RR: "
+        f"{signal['rr']:.2f}\n"
+
+        f"Score: "
+        f"{signal['score']:.2f}\n\n"
+
         f"Signal candle:\n"
         f"{signal_time}\n\n"
+
         "MANUAL MT5 EXECUTION"
     )
 
 
 # ============================================================
-# PROCESS MARKET
+# MARKET PROCESSING
 # ============================================================
 
 def process_market(
     market,
     config,
-    state,
+    state
 ):
 
     if not config.get(
         "enabled",
-        False,
+        False
     ):
 
-        return state
+        return
 
     print()
-    print("=" * 60)
     print(
-        f"CHECKING {market}"
+        "=" * 60
     )
-    print("=" * 60)
 
-    # --------------------------------------------------------
-    # LOAD DATA
-    # --------------------------------------------------------
+    print(
+        f"MONITORING {market}"
+    )
+
+    print(
+        "=" * 60
+    )
 
     df = load_data(
         market,
-        config,
+        config
     )
 
-    if df is None:
-        return state
-
-    print(
-        "Candles:",
-        len(df),
+    df = prepare_indicators(
+        df
     )
 
-    print(
-        "Latest:",
-        df["time"].iloc[-1],
+    latest_time = str(
+        df["time"].iloc[-1]
+    )
+
+    previous_latest = state[
+        market
+    ].get(
+        "last_candle",
+        ""
     )
 
     # --------------------------------------------------------
-    # INDICATORS
+    # New candle detected
     # --------------------------------------------------------
 
-    df = prepare_indicators(df)
+    new_candle = (
+        latest_time
+        != previous_latest
+    )
+
+    if new_candle:
+
+        print(
+            f"{market}: "
+            f"NEW CANDLE {latest_time}"
+        )
+
+        state[
+            market
+        ]["last_candle"] = (
+            latest_time
+        )
+
+        # ----------------------------------------------------
+        # Confirmed signal
+        # ----------------------------------------------------
+
+        signal = build_confirmed_signal(
+            market,
+            df,
+            config
+        )
+
+        if signal is not None:
+
+            signal_id = (
+
+                f"{market}|"
+                f"{signal['signal_time']}|"
+                f"{signal['direction']}"
+            )
+
+            last_signal = state[
+                market
+            ].get(
+                "last_signal",
+                ""
+            )
+
+            if signal_id != last_signal:
+
+                message = confirmed_message(
+                    signal
+                )
+
+                print()
+                print(message)
+
+                send_telegram(
+                    message
+                )
+
+                state[
+                    market
+                ]["last_signal"] = (
+                    signal_id
+                )
+
+                print(
+                    "CONFIRMED SIGNAL SENT."
+                )
+
+        else:
+
+            print(
+                f"{market}: "
+                "No confirmed signal."
+            )
 
     # --------------------------------------------------------
-    # SIGNAL
+    # Developing setup
     # --------------------------------------------------------
 
-    signal = build_signal(
+    presignal = build_presignal(
         market,
         df,
-        config,
+        config
     )
 
-    if signal is None:
+    if presignal is not None:
 
-        print(
-            "No signal."
+        presignal_id = (
+
+            f"{market}|"
+            f"{presignal['candle_time']}|"
+            f"{presignal['direction']}"
         )
 
-        return state
-
-    # --------------------------------------------------------
-    # UNIQUE SIGNAL ID
-    # --------------------------------------------------------
-
-    signal_id = (
-        f"{market}|"
-        f"{signal['signal_time']}|"
-        f"{signal['direction']}"
-    )
-
-    # --------------------------------------------------------
-    # DUPLICATE PROTECTION
-    # --------------------------------------------------------
-
-    if state.get(market) == signal_id:
-
-        print(
-            "Signal already sent."
+        last_presignal = state[
+            market
+        ].get(
+            "last_presignal",
+            ""
         )
 
-        return state
+        if (
+            presignal_id
+            != last_presignal
+        ):
 
-    # --------------------------------------------------------
-    # MESSAGE
-    # --------------------------------------------------------
+            message = presignal_message(
+                presignal
+            )
 
-    message = signal_message(
-        signal
-    )
+            print()
+            print(message)
 
-    print()
-    print(message)
+            send_telegram(
+                message
+            )
 
-    # --------------------------------------------------------
-    # TELEGRAM
-    # --------------------------------------------------------
+            state[
+                market
+            ]["last_presignal"] = (
+                presignal_id
+            )
 
-    send_telegram(message)
+            print(
+                "PRE-SIGNAL SENT."
+            )
 
-    state[market] = signal_id
 
-    print()
-    print(
-        "Telegram signal sent."
-    )
+# ============================================================
+# INITIAL STATE
+# ============================================================
+
+def initialise_state():
+
+    state = load_state()
+
+    for market in MARKETS:
+
+        if market not in state:
+
+            state[market] = {
+
+                "last_candle": "",
+
+                "last_signal": "",
+
+                "last_presignal": "",
+            }
 
     return state
 
 
 # ============================================================
-# MAIN
+# MAIN CONTINUOUS LOOP
 # ============================================================
 
 def main():
 
     print()
-    print("=" * 60)
     print(
-        "V11.8 MULTI-MARKET "
-        "TELEGRAM SIGNAL BOT"
+        "=" * 60
     )
-    print("=" * 60)
+
+    print(
+        "V11.8 CONTINUOUS "
+        "MULTI-MARKET SIGNAL BOT"
+    )
+
+    print(
+        "=" * 60
+    )
 
     print(
         "SIGNALS ONLY"
@@ -964,88 +1291,166 @@ def main():
         "NO AUTOMATIC TRADING"
     )
 
-    print("=" * 60)
+    print(
+        "=" * 60
+    )
 
-    state = load_state()
+    print(
+        "MARKETS: XAUUSD, EURUSD"
+    )
 
-    enabled_markets = [
-        market
-        for market, config in MARKETS.items()
-        if config.get(
-            "enabled",
-            False,
+    print(
+        "MODE: CONTINUOUS"
+    )
+
+    print(
+        "CHECK INTERVAL:",
+        CHECK_INTERVAL_SECONDS,
+        "seconds"
+    )
+
+    print(
+        "=" * 60
+    )
+
+    state = initialise_state()
+
+    last_refresh = {}
+
+    # --------------------------------------------------------
+    # Continuous operation
+    # --------------------------------------------------------
+
+    while True:
+
+        loop_start = time.time()
+
+        print()
+        print(
+            "HEARTBEAT:",
+            utc_now().strftime(
+                "%Y-%m-%d %H:%M:%S UTC"
+            )
         )
-    ]
 
-    print()
-    print(
-        "ENABLED MARKETS:",
-        ", ".join(enabled_markets),
-    )
+        for market, config in MARKETS.items():
 
-    # --------------------------------------------------------
-    # PROCESS
-    # --------------------------------------------------------
+            if not config.get(
+                "enabled",
+                False
+            ):
 
-    for market, config in MARKETS.items():
+                continue
 
-        if not config.get(
-            "enabled",
-            False,
-        ):
+            try:
 
-            continue
+                # ------------------------------------------------
+                # Refresh data only when required.
+                # ------------------------------------------------
 
-        try:
+                now = time.time()
 
-            state = process_market(
-                market,
-                config,
-                state,
-            )
+                last_market_refresh = (
+                    last_refresh.get(
+                        market,
+                        0
+                    )
+                )
 
-        except Exception as error:
+                if (
+                    now
+                    - last_market_refresh
+                    >= DATA_REFRESH_SECONDS
+                ):
 
-            print()
-            print(
-                f"{market} ERROR:"
-            )
+                    process_market(
+                        market,
+                        config,
+                        state
+                    )
 
-            print(
-                type(error).__name__,
-                error,
-            )
+                    last_refresh[
+                        market
+                    ] = now
 
-    # --------------------------------------------------------
-    # SAVE
-    # --------------------------------------------------------
+                else:
 
-    save_state(state)
+                    print(
+                        f"{market}: "
+                        "waiting for data refresh..."
+                    )
 
-    # --------------------------------------------------------
-    # COMPLETE
-    # --------------------------------------------------------
+            except Exception as error:
 
-    print()
-    print("=" * 60)
-    print(
-        "SIGNAL CHECK COMPLETE"
-    )
+                print()
+                print(
+                    f"{market} ERROR:"
+                )
 
-    print(
-        datetime.now(
-            timezone.utc
-        ).strftime(
-            "%Y-%m-%d %H:%M:%S UTC"
+                print(
+                    type(error).__name__,
+                    error
+                )
+
+        save_state(
+            state
         )
-    )
 
-    print("=" * 60)
+        elapsed = (
+            time.time()
+            - loop_start
+        )
+
+        sleep_for = max(
+
+            1,
+
+            CHECK_INTERVAL_SECONDS
+            - elapsed
+        )
+
+        print()
+        print(
+            "NEXT CHECK IN:",
+            round(
+                sleep_for,
+                1
+            ),
+            "seconds"
+        )
+
+        time.sleep(
+            sleep_for
+        )
 
 
 # ============================================================
-# ENTRY POINT
+# START
 # ============================================================
 
 if __name__ == "__main__":
-    main()
+
+    try:
+
+        main()
+
+    except KeyboardInterrupt:
+
+        print()
+        print(
+            "SIGNAL BOT STOPPED."
+        )
+
+    except Exception as error:
+
+        print()
+        print(
+            "FATAL ERROR:"
+        )
+
+        print(
+            type(error).__name__,
+            error
+        )
+
+        raise
