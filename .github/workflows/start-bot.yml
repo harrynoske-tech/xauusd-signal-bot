@@ -12,9 +12,12 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
         run: |
-          python -c 'import os, requests; token=os.environ["TELEGRAM_BOT_TOKEN"]; chat_id=os.environ["TELEGRAM_CHAT_ID"]; message="""🟢 SIGNALS BOT LIVE
+          curl --fail --silent --show-error \
+            --request POST \
+            --url "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=🟢 SIGNALS BOT LIVE
 
 V11.8 Multi-Market Signal Bot is now online.
 
@@ -29,4 +32,6 @@ Execution:
 Manual MT5
 
 Status:
-🟢 Monitoring for signals"""; url=f"https://api.telegram.org/bot{token}/sendMessage"; response=requests.post(url, json={"chat_id": chat_id, "text": message}, timeout=20); response.raise_for_status(); print("Telegram startup message sent.")'
+🟢 Monitoring for signals"
+
+          echo "Telegram startup message sent successfully."
