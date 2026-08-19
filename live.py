@@ -1,1550 +1,2363 @@
 import os
 import time
-from datetime import datetime
+import threading
+from datetime import datetime, timezone
 
+import numpy as np
 import pandas as pd
 import requests
-import yfinance as yf
 
-from strategy import (
-    generate_signal,
-    get_weekly_daily_areas,
-)
+
+# ============================================================
+# V11.8 CONTINUOUS DUKASCOPY LIVE SIGNAL BOT
+# ============================================================
+#
+# XAUUSD + EURUSD
+#
+# STARTUP:
+#   1. Load historical data for context/backscan
+#   2. Build indicators
+#   3. Connect to Dukascopy current prices
+#
+# LIVE:
+#   - Poll Dukascopy current prices every second
+#   - Maintain the current 15-minute candle in memory
+#   - Continuously analyse the developing candle
+#   - Send pre-signals when a setup is developing
+#   - Confirm signals when the 15m candle closes
+#   - Use the CURRENT live price for the actual entry
+#
+# TELEGRAM:
+#   /dash
+#   /status
+#   /report
+#
+# TRADING:
+#   NO MT5 CONNECTION
+#   NO AUTOMATIC TRADING
+#   SIGNALS ONLY
+#
+# The process intentionally does not terminate.
+# ============================================================
 
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
 
-PRIMARY_PRICE_URL = "https://api.gold-api.com/price/XAU"
+DATA_DIR = "data"
 
-TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHAT_ID = "6371468101"
+TELEGRAM_BOT_TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN"
+)
 
-PRICE_INTERVAL = 1
-DATA_REFRESH_INTERVAL = 60
-HEARTBEAT_INTERVAL = 30
+TELEGRAM_CHAT_ID = os.getenv(
+    "TELEGRAM_CHAT_ID"
+)
 
-MAX_PRICE_DISCREPANCY = 5.0
-AOI_APPROACH_DISTANCE = 5.0
+DUKASCOPY_BASE = (
+    "https://freeserv.dukascopy.com/2.0/"
+)
+
+PRICE_INTERVAL_SECONDS = 1
+
+HEARTBEAT_SECONDS = 60
+
+BACKSCAN_CANDLES = 5000
+
+MAX_CANDLES_IN_MEMORY = 5000
+
+PRE_SIGNAL_COOLDOWN_SECONDS = 300
 
 
 # ============================================================
-# PRICE
+# MARKETS
 # ============================================================
 
-def get_gold_api_price():
+MARKETS = {
 
-    response = requests.get(
-        PRIMARY_PRICE_URL,
-        timeout=10
+    "XAUUSD": {
+
+        "instrument": "xauusd",
+
+        "display": "XAUUSD",
+
+        "file": (
+            "data/XAUUSD_15m.csv"
+        ),
+
+        "rr": 0.35,
+
+        "wick": 0.20,
+
+        "body": 0.15,
+
+        "separation": 0.00040,
+
+        "threshold": -0.25,
+
+        "hours": (3, 4),
+
+    },
+
+    "EURUSD": {
+
+        "instrument": "eurusd",
+
+        "display": "EURUSD",
+
+        "file": (
+            "data/EURUSD_15m.csv"
+        ),
+
+        "rr": 0.35,
+
+        "wick": 0.20,
+
+        "body": 0.15,
+
+        "separation": 0.00050,
+
+        "threshold": 0.00,
+
+        "hours": (3, 4, 5),
+
+    },
+}
+
+
+# ============================================================
+# RUNTIME STATE
+# ============================================================
+
+market_data = {}
+
+market_quotes = {}
+
+market_state = {}
+
+telegram_offset = None
+
+state_lock = threading.Lock()
+
+running = True
+
+
+# ============================================================
+# TIME
+# ============================================================
+
+def utc_now():
+
+    return datetime.now(
+        timezone.utc
     )
 
-    response.raise_for_status()
 
-    return float(
-        response.json()["price"]
+def current_bucket():
+
+    now = utc_now()
+
+    minute = (
+        now.minute
+        - (now.minute % 15)
+    )
+
+    return now.replace(
+        minute=minute,
+        second=0,
+        microsecond=0
     )
 
 
-def get_yahoo_price():
+# ============================================================
+# LOGGING
+# ============================================================
 
-    gold = yf.Ticker("GC=F")
+def log(message):
 
-    data = gold.history(
-        period="1d",
-        interval="1m"
+    print(
+        "["
+        + utc_now().strftime(
+            "%Y-%m-%d %H:%M:%S UTC"
+        )
+        + "] "
+        + str(message),
+        flush=True
     )
-
-    if data.empty:
-
-        raise RuntimeError(
-            "Yahoo Finance returned no price data."
-        )
-
-    return float(
-        data["Close"].iloc[-1]
-    )
-
-
-def get_live_price(last_trusted_price):
-
-    try:
-
-        price = get_gold_api_price()
-
-        return {
-            "price": price,
-            "source": "Gold API",
-            "trusted": True
-        }
-
-    except Exception as error:
-
-        print(
-            "PRIMARY PRICE ERROR:",
-            error,
-            flush=True
-        )
-
-    try:
-
-        fallback_price = get_yahoo_price()
-
-        if last_trusted_price is not None:
-
-            difference = abs(
-                fallback_price
-                - last_trusted_price
-            )
-
-            if difference > MAX_PRICE_DISCREPANCY:
-
-                print(
-                    "UNSAFE FALLBACK PRICE:",
-                    round(fallback_price, 2),
-                    "| LAST TRUSTED:",
-                    round(last_trusted_price, 2),
-                    "| DIFFERENCE:",
-                    round(difference, 2),
-                    flush=True
-                )
-
-                return {
-                    "price": last_trusted_price,
-                    "source": "LAST TRUSTED PRICE",
-                    "trusted": False
-                }
-
-        return {
-            "price": fallback_price,
-            "source": "Yahoo Finance",
-            "trusted": False
-        }
-
-    except Exception as error:
-
-        print(
-            "FALLBACK PRICE ERROR:",
-            error,
-            flush=True
-        )
-
-        if last_trusted_price is not None:
-
-            return {
-                "price": last_trusted_price,
-                "source": "LAST TRUSTED PRICE",
-                "trusted": False
-            }
-
-        raise RuntimeError(
-            "ALL PRICE SOURCES FAILED."
-        )
 
 
 # ============================================================
 # TELEGRAM
 # ============================================================
 
+def telegram_url(method):
+
+    return (
+        "https://api.telegram.org/bot"
+        + TELEGRAM_BOT_TOKEN
+        + "/"
+        + method
+    )
+
+
 def send_telegram(message):
 
-    url = (
-        "https://api.telegram.org/bot"
-        + TELEGRAM_TOKEN
-        + "/sendMessage"
-    )
+    if not TELEGRAM_BOT_TOKEN:
 
-    response = requests.post(
-        url,
-        json={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message
-        },
-        timeout=10
-    )
-
-    response.raise_for_status()
-
-
-def get_telegram_updates(offset=None):
-
-    url = (
-        "https://api.telegram.org/bot"
-        + TELEGRAM_TOKEN
-        + "/getUpdates"
-    )
-
-    params = {
-        "timeout": 1
-    }
-
-    if offset is not None:
-
-        params["offset"] = offset
-
-    response = requests.get(
-        url,
-        params=params,
-        timeout=5
-    )
-
-    response.raise_for_status()
-
-    return response.json().get(
-        "result",
-        []
-    )
-
-
-# ============================================================
-# MARKET DATA
-# ============================================================
-
-def get_market_data():
-
-    gold = yf.Ticker("GC=F")
-
-    data_daily = gold.history(
-        period="5y",
-        interval="1d"
-    )
-
-    data_15m = gold.history(
-        period="5d",
-        interval="15m"
-    )
-
-    if data_daily.empty:
-
-        raise RuntimeError(
-            "No daily market data received."
+        log(
+            "ERROR: "
+            "TELEGRAM_BOT_TOKEN missing."
         )
 
-    if data_15m.empty:
+        return False
 
-        raise RuntimeError(
-            "No 15m market data received."
+    if not TELEGRAM_CHAT_ID:
+
+        log(
+            "ERROR: "
+            "TELEGRAM_CHAT_ID missing."
         )
 
-    return data_15m, data_daily
+        return False
 
+    try:
 
-# ============================================================
-# LIVE 15M CANDLE
-# ============================================================
+        response = requests.post(
 
-def get_current_15m_timestamp(index):
-
-    now = pd.Timestamp.now(
-        tz=index.tz
-    )
-
-    return now.floor("15min")
-
-
-def update_live_candle(
-    data_15m,
-    price
-):
-
-    data_15m = data_15m.copy()
-
-    timestamp = get_current_15m_timestamp(
-        data_15m.index
-    )
-
-    if timestamp in data_15m.index:
-
-        data_15m.loc[
-            timestamp,
-            "Close"
-        ] = price
-
-        data_15m.loc[
-            timestamp,
-            "High"
-        ] = max(
-            float(
-                data_15m.loc[
-                    timestamp,
-                    "High"
-                ]
+            telegram_url(
+                "sendMessage"
             ),
-            price
-        )
 
-        data_15m.loc[
-            timestamp,
-            "Low"
-        ] = min(
-            float(
-                data_15m.loc[
-                    timestamp,
-                    "Low"
-                ]
-            ),
-            price
-        )
+            json={
+                "chat_id":
+                    TELEGRAM_CHAT_ID,
 
-    else:
-
-        candle = pd.DataFrame(
-            {
-                "Open": [price],
-                "High": [price],
-                "Low": [price],
-                "Close": [price],
-                "Volume": [0]
+                "text":
+                    message,
             },
-            index=[timestamp]
+
+            timeout=10,
         )
 
-        data_15m = pd.concat(
-            [
-                data_15m,
-                candle
-            ]
+        response.raise_for_status()
+
+        return True
+
+    except Exception as error:
+
+        log(
+            "TELEGRAM ERROR: "
+            + str(error)
         )
 
-    return data_15m
+        return False
 
 
 # ============================================================
-# AOI HELPERS
+# TELEGRAM COMMANDS
 # ============================================================
 
-def get_all_aois(
-    data_daily,
-    current_price
-):
+def get_telegram_updates():
 
-    areas = get_weekly_daily_areas(
-        data_daily,
-        current_price=current_price
-    )
+    global telegram_offset
 
-    if not isinstance(
-        areas,
-        dict
-    ):
+    if not TELEGRAM_BOT_TOKEN:
 
         return []
 
-    all_areas = []
+    try:
 
-    for timeframe in (
-        "weekly",
-        "daily"
-    ):
+        params = {
+            "timeout": 1,
+        }
 
-        zones = areas.get(
-            timeframe,
+        if telegram_offset is not None:
+
+            params["offset"] = (
+                telegram_offset
+            )
+
+        response = requests.get(
+
+            telegram_url(
+                "getUpdates"
+            ),
+
+            params=params,
+
+            timeout=5,
+        )
+
+        response.raise_for_status()
+
+        return response.json().get(
+            "result",
             []
         )
 
+    except Exception as error:
+
+        log(
+            "TELEGRAM UPDATE ERROR: "
+            + str(error)
+        )
+
+        return []
+
+
+# ============================================================
+# PRICE FORMAT
+# ============================================================
+
+def decimals(market):
+
+    if market == "XAUUSD":
+
+        return 2
+
+    return 5
+
+
+def fmt_price(
+    market,
+    value
+):
+
+    return (
+        f"{float(value):."
+        f"{decimals(market)}f}"
+    )
+
+
+# ============================================================
+# DUKASCOPY CURRENT PRICE
+# ============================================================
+
+def get_current_prices():
+
+    response = requests.get(
+
+        DUKASCOPY_BASE,
+
+        params={
+            "path": "api/currentPrices",
+
+            "instruments":
+                "xauusd,eurusd",
+        },
+
+        timeout=10,
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    if isinstance(
+        data,
+        dict
+    ):
+
+        if "data" in data:
+
+            data = data["data"]
+
+        elif "result" in data:
+
+            data = data["result"]
+
+    if not isinstance(
+        data,
+        list
+    ):
+
+        raise RuntimeError(
+            "Unexpected Dukascopy "
+            "currentPrices response."
+        )
+
+    prices = {}
+
+    for item in data:
+
         if not isinstance(
-            zones,
-            list
+            item,
+            dict
         ):
 
             continue
 
-        for zone in zones:
+        raw_symbol = str(
+
+            item.get(
+                "instrument",
+                item.get(
+                    "symbol",
+                    item.get(
+                        "name",
+                        ""
+                    )
+                )
+            )
+        ).upper()
+
+        symbol = (
+            raw_symbol
+            .replace(
+                "/",
+                ""
+            )
+            .replace(
+                "_",
+                ""
+            )
+            .replace(
+                "-",
+                ""
+            )
+        )
+
+        if symbol == "XAUUSD":
+
+            market = "XAUUSD"
+
+        elif symbol == "EURUSD":
+
+            market = "EURUSD"
+
+        else:
+
+            continue
+
+        bid = (
+            item.get("bid")
+            if item.get("bid")
+            is not None
+
+            else item.get(
+                "bidPrice"
+            )
+        )
+
+        ask = (
+            item.get("ask")
+            if item.get("ask")
+            is not None
+
+            else item.get(
+                "askPrice"
+            )
+        )
+
+        if bid is None:
+
+            bid = item.get(
+                "Bid"
+            )
+
+        if ask is None:
+
+            ask = item.get(
+                "Ask"
+            )
+
+        if bid is None:
+
+            continue
+
+        if ask is None:
+
+            ask = bid
+
+        bid = float(bid)
+
+        ask = float(ask)
+
+        if bid <= 0:
+
+            continue
+
+        if ask <= 0:
+
+            continue
+
+        prices[market] = {
+
+            "bid": bid,
+
+            "ask": ask,
+
+            "mid": (
+                bid + ask
+            ) / 2.0,
+
+            "time": utc_now(),
+
+        }
+
+    missing = [
+
+        market
+
+        for market in MARKETS
+
+        if market not in prices
+    ]
+
+    if missing:
+
+        raise RuntimeError(
+            "Dukascopy did not return "
+            + ", ".join(missing)
+        )
+
+    return prices
+
+
+# ============================================================
+# HISTORICAL DATA
+# ============================================================
+
+def load_csv_history(
+    market,
+    config
+):
+
+    path = config["file"]
+
+    if not os.path.exists(path):
+
+        raise RuntimeError(
+            f"{market}: "
+            f"{path} not found."
+        )
+
+    df = pd.read_csv(
+        path
+    )
+
+    df.columns = [
+
+        str(column)
+        .strip()
+        .lower()
+        .replace(
+            " ",
+            "_"
+        )
+
+        for column in df.columns
+    ]
+
+    time_column = None
+
+    for candidate in (
+        "time",
+        "datetime",
+        "date",
+        "timestamp",
+    ):
+
+        if candidate in df.columns:
+
+            time_column = candidate
+
+            break
+
+    if time_column is None:
+
+        raise RuntimeError(
+            f"{market}: "
+            "no timestamp column."
+        )
+
+    required = [
+        "open",
+        "high",
+        "low",
+        "close",
+    ]
+
+    for column in required:
+
+        if column not in df.columns:
+
+            raise RuntimeError(
+                f"{market}: "
+                f"missing {column}."
+            )
+
+        df[column] = pd.to_numeric(
+            df[column],
+            errors="coerce"
+        )
+
+    df["time"] = pd.to_datetime(
+
+        df[time_column],
+
+        utc=True,
+
+        errors="coerce"
+    )
+
+    df = df.dropna(
+
+        subset=[
+            "time",
+            *required,
+        ]
+    )
+
+    df = (
+
+        df
+
+        .sort_values(
+            "time"
+        )
+
+        .drop_duplicates(
+            subset="time"
+        )
+
+        .reset_index(
+            drop=True
+        )
+    )
+
+    return df
+
+
+def try_dukascopy_history(
+    market,
+    config
+):
+
+    try:
+
+        response = requests.get(
+
+            DUKASCOPY_BASE,
+
+            params={
+
+                "path":
+                    "api/historicalPrices",
+
+                "instrument":
+                    config["instrument"],
+
+                "timeFrame":
+                    "15m",
+
+                "count":
+                    BACKSCAN_CANDLES,
+
+                "offerSide":
+                    "B",
+
+            },
+
+            timeout=20,
+        )
+
+        response.raise_for_status()
+
+        payload = response.json()
+
+        if isinstance(
+            payload,
+            dict
+        ):
+
+            if "data" in payload:
+
+                payload = payload["data"]
+
+            elif "result" in payload:
+
+                payload = payload["result"]
+
+        if not isinstance(
+            payload,
+            list
+        ):
+
+            return None
+
+        rows = []
+
+        for item in payload:
 
             if not isinstance(
-                zone,
+                item,
                 dict
             ):
 
                 continue
 
-            zone_copy = dict(
-                zone
+            timestamp = (
+
+                item.get("time")
+
+                if item.get("time")
+                is not None
+
+                else item.get(
+                    "timestamp"
+                )
             )
 
-            zone_copy["timeframe"] = (
-                timeframe
-            )
+            if timestamp is None:
 
-            # Calculate distance from current price.
-            low = zone_copy.get("low")
-            high = zone_copy.get("high")
+                continue
 
-            if (
-                low is not None
-                and high is not None
+            if isinstance(
+                timestamp,
+                str
             ):
 
-                low = float(low)
-                high = float(high)
-
-                if (
-                    low
-                    <= current_price
-                    <= high
-                ):
-
-                    distance = 0.0
-
-                elif current_price < low:
-
-                    distance = (
-                        low
-                        - current_price
-                    )
-
-                else:
-
-                    distance = (
-                        current_price
-                        - high
-                    )
-
-                zone_copy["distance"] = (
-                    distance
+                parsed_time = pd.to_datetime(
+                    timestamp,
+                    utc=True,
+                    errors="coerce"
                 )
 
-            all_areas.append(
-                zone_copy
+            else:
+
+                timestamp = float(
+                    timestamp
+                )
+
+                if timestamp < 10_000_000_000:
+
+                    timestamp *= 1000
+
+                parsed_time = pd.to_datetime(
+
+                    timestamp,
+
+                    unit="ms",
+
+                    utc=True,
+
+                    errors="coerce"
+                )
+
+            if pd.isna(
+                parsed_time
+            ):
+
+                continue
+
+            open_price = item.get(
+                "open"
             )
 
-    all_areas.sort(
-        key=lambda zone: (
-            zone.get(
-                "distance",
-                float("inf")
-            ),
-            -zone.get(
-                "touches",
-                0
+            high = item.get(
+                "high"
             )
+
+            low = item.get(
+                "low"
+            )
+
+            close = item.get(
+                "close"
+            )
+
+            if None in (
+                open_price,
+                high,
+                low,
+                close,
+            ):
+
+                continue
+
+            rows.append({
+
+                "time":
+                    parsed_time,
+
+                "open":
+                    float(open_price),
+
+                "high":
+                    float(high),
+
+                "low":
+                    float(low),
+
+                "close":
+                    float(close),
+
+            })
+
+        if not rows:
+
+            return None
+
+        df = pd.DataFrame(
+            rows
+        )
+
+        df = (
+
+            df
+
+            .sort_values(
+                "time"
+            )
+
+            .drop_duplicates(
+                subset="time"
+            )
+
+            .reset_index(
+                drop=True
+            )
+        )
+
+        return df
+
+    except Exception as error:
+
+        log(
+            f"{market}: "
+            "Dukascopy historical API "
+            "refresh failed: "
+            + str(error)
+        )
+
+        return None
+
+
+def build_startup_history(
+    market,
+    config
+):
+
+    log(
+        f"{market}: loading startup "
+        "historical context..."
+    )
+
+    local_df = load_csv_history(
+        market,
+        config
+    )
+
+    live_history = (
+        try_dukascopy_history(
+            market,
+            config
         )
     )
 
-    return all_areas
+    if (
+        live_history is not None
+        and len(live_history) >= 100
+    ):
+
+        log(
+            f"{market}: using "
+            "fresh Dukascopy historical "
+            f"data ({len(live_history)} candles)."
+        )
+
+        df = live_history
+
+    else:
+
+        log(
+            f"{market}: using local "
+            f"historical data ({len(local_df)} candles)."
+        )
+
+        df = local_df
+
+    return df.tail(
+        MAX_CANDLES_IN_MEMORY
+    ).reset_index(
+        drop=True
+    )
 
 
-def find_approaching_aoi(
-    data_daily,
-    bias,
+# ============================================================
+# LIVE CANDLE MANAGEMENT
+# ============================================================
+
+def ensure_current_candle(
+    market,
     price
 ):
 
-    areas = get_all_aois(
-        data_daily,
-        price
+    df = market_data[
+        market
+    ]
+
+    bucket = current_bucket()
+
+    if len(df) == 0:
+
+        candle = pd.DataFrame({
+
+            "time":
+                [bucket],
+
+            "open":
+                [price],
+
+            "high":
+                [price],
+
+            "low":
+                [price],
+
+            "close":
+                [price],
+
+        })
+
+        market_data[
+            market
+        ] = candle
+
+        return
+
+    latest_time = pd.Timestamp(
+        df.iloc[-1]["time"]
     )
 
-    overall_bias = bias.get(
-        "overall",
-        "NEUTRAL"
+    latest_time = latest_time.tz_convert(
+        "UTC"
     )
 
-    for zone in areas:
+    if latest_time > bucket:
 
-        zone_type = zone.get(
-            "type"
-        )
+        return
 
-        low = zone.get(
-            "low"
-        )
+    if latest_time == bucket:
 
-        high = zone.get(
+        idx = df.index[-1]
+
+        df.at[
+            idx,
+            "close"
+        ] = price
+
+        df.at[
+            idx,
             "high"
+        ] = max(
+
+            float(
+                df.at[
+                    idx,
+                    "high"
+                ]
+            ),
+
+            price
+        )
+
+        df.at[
+            idx,
+            "low"
+        ] = min(
+
+            float(
+                df.at[
+                    idx,
+                    "low"
+                ]
+            ),
+
+            price
+        )
+
+        return
+
+    candle = pd.DataFrame({
+
+        "time":
+            [bucket],
+
+        "open":
+            [price],
+
+        "high":
+            [price],
+
+        "low":
+            [price],
+
+        "close":
+            [price],
+
+    })
+
+    market_data[
+        market
+    ] = pd.concat(
+
+        [
+            df,
+            candle,
+        ],
+
+        ignore_index=True
+    ).tail(
+        MAX_CANDLES_IN_MEMORY
+    ).reset_index(
+        drop=True
+    )
+
+
+# ============================================================
+# INDICATORS
+# ============================================================
+
+def prepare_indicators(df):
+
+    df = df.copy()
+
+    high = df["high"]
+
+    low = df["low"]
+
+    open_price = df["open"]
+
+    close = df["close"]
+
+    candle_range = (
+        high - low
+    )
+
+    body = (
+        close - open_price
+    ).abs()
+
+    df["body_ratio"] = np.where(
+
+        candle_range > 0,
+
+        body / candle_range,
+
+        np.nan
+    )
+
+    df["upper_wick"] = np.where(
+
+        candle_range > 0,
+
+        (
+            high
+            - np.maximum(
+                open_price,
+                close
+            )
+        )
+        / candle_range,
+
+        np.nan
+    )
+
+    df["lower_wick"] = np.where(
+
+        candle_range > 0,
+
+        (
+            np.minimum(
+                open_price,
+                close
+            )
+            - low
+        )
+        / candle_range,
+
+        np.nan
+    )
+
+    previous_close = (
+        close.shift(1)
+    )
+
+    true_range = pd.concat(
+
+        [
+
+            high - low,
+
+            (
+                high
+                - previous_close
+            ).abs(),
+
+            (
+                low
+                - previous_close
+            ).abs(),
+
+        ],
+
+        axis=1
+
+    ).max(
+        axis=1
+    )
+
+    df["atr14"] = (
+
+        true_range
+
+        .rolling(
+            14,
+            min_periods=14
+        )
+
+        .mean()
+    )
+
+    df["ema20"] = (
+
+        close
+
+        .ewm(
+            span=20,
+            adjust=False
+        )
+
+        .mean()
+    )
+
+    df["ema50"] = (
+
+        close
+
+        .ewm(
+            span=50,
+            adjust=False
+        )
+
+        .mean()
+    )
+
+    df["momentum5"] = (
+
+        close
+        / close.shift(5)
+        - 1.0
+    )
+
+    high20 = (
+
+        high
+
+        .rolling(
+            20,
+            min_periods=20
+        )
+
+        .max()
+    )
+
+    low20 = (
+
+        low
+
+        .rolling(
+            20,
+            min_periods=20
+        )
+
+        .min()
+    )
+
+    range20 = (
+        high20 - low20
+    )
+
+    df["range_position"] = np.where(
+
+        range20 > 0,
+
+        (
+            close - low20
+        )
+        / range20,
+
+        np.nan
+    )
+
+    return df
+
+
+# ============================================================
+# V11.8 SCORE
+# ============================================================
+
+def calculate_score(
+    row,
+    config
+):
+
+    if pd.isna(
+        row["atr14"]
+    ):
+
+        return None
+
+    if row["atr14"] <= 0:
+
+        return None
+
+    score = 0.0
+
+    bullish = (
+        row["close"]
+        > row["open"]
+    )
+
+    bearish = (
+        row["close"]
+        < row["open"]
+    )
+
+    if (
+        row["lower_wick"]
+        >= config["wick"]
+    ):
+
+        score += 1.0
+
+    if (
+        row["upper_wick"]
+        >= config["wick"]
+    ):
+
+        score -= 1.0
+
+    if (
+        row["body_ratio"]
+        <= config["body"]
+    ):
+
+        score += 0.50
+
+    if bullish:
+
+        score += 0.25
+
+    elif bearish:
+
+        score -= 0.25
+
+    if (
+
+        bullish
+
+        and row["range_position"]
+        <= 0.35
+
+    ):
+
+        score += 0.50
+
+    if (
+
+        bearish
+
+        and row["range_position"]
+        >= 0.65
+
+    ):
+
+        score -= 0.50
+
+    if (
+
+        bullish
+
+        and row["momentum5"] > 0
+
+    ):
+
+        score += 0.25
+
+    elif (
+
+        bearish
+
+        and row["momentum5"] < 0
+
+    ):
+
+        score -= 0.25
+
+    if (
+        row["ema20"]
+        > row["ema50"]
+    ):
+
+        score += 0.10
+
+    elif (
+        row["ema20"]
+        < row["ema50"]
+    ):
+
+        score -= 0.10
+
+    separation = (
+
+        abs(
+            row["ema20"]
+            - row["ema50"]
+        )
+
+        / row["atr14"]
+    )
+
+    if (
+        separation
+        >= config["separation"]
+    ):
+
+        if (
+            row["ema20"]
+            > row["ema50"]
+        ):
+
+            score += 0.10
+
+        else:
+
+            score -= 0.10
+
+    return float(score)
+
+
+# ============================================================
+# DEVELOPING SETUP
+# ============================================================
+
+def get_developing_setup(
+    market
+):
+
+    config = MARKETS[
+        market
+    ]
+
+    df = market_data[
+        market
+    ]
+
+    if len(df) < 100:
+
+        return None
+
+    live_df = prepare_indicators(
+        df
+    )
+
+    row = live_df.iloc[-1]
+
+    score = calculate_score(
+        row,
+        config
+    )
+
+    if score is None:
+
+        return None
+
+    if score >= 0.75:
+
+        direction = "BUY"
+
+    elif score <= -0.75:
+
+        direction = "SELL"
+
+    else:
+
+        return None
+
+    return {
+
+        "direction":
+            direction,
+
+        "score":
+            score,
+
+        "candle_time":
+            row["time"],
+
+        "atr":
+            float(
+                row["atr14"]
+            ),
+
+    }
+
+
+# ============================================================
+# CONFIRMED SIGNAL
+# ============================================================
+
+def get_confirmed_signal(
+    market,
+    live_price
+):
+
+    config = MARKETS[
+        market
+    ]
+
+    df = market_data[
+        market
+    ]
+
+    if len(df) < 100:
+
+        return None
+
+    prepared = prepare_indicators(
+        df
+    )
+
+    if len(prepared) < 2:
+
+        return None
+
+    candle = prepared.iloc[-2]
+
+    candle_time = (
+        pd.Timestamp(
+            candle["time"]
+        )
+        .to_pydatetime()
+    )
+
+    if (
+        candle_time.hour
+        not in config["hours"]
+    ):
+
+        return None
+
+    score = calculate_score(
+        candle,
+        config
+    )
+
+    if score is None:
+
+        return None
+
+    if (
+        score
+        < config["threshold"]
+    ):
+
+        return None
+
+    direction = (
+
+        "BUY"
+
+        if score >= 0
+
+        else "SELL"
+    )
+
+    atr = float(
+        candle["atr14"]
+    )
+
+    if atr <= 0:
+
+        return None
+
+    entry = float(
+        live_price
+    )
+
+    rr = config[
+        "rr"
+    ]
+
+    if direction == "BUY":
+
+        sl = (
+            entry - atr
+        )
+
+        tp = (
+            entry
+            + atr * rr
+        )
+
+    else:
+
+        sl = (
+            entry + atr
+        )
+
+        tp = (
+            entry
+            - atr * rr
+        )
+
+    return {
+
+        "market":
+            market,
+
+        "direction":
+            direction,
+
+        "entry":
+            entry,
+
+        "sl":
+            sl,
+
+        "tp":
+            tp,
+
+        "rr":
+            rr,
+
+        "score":
+            score,
+
+        "signal_time":
+            candle_time,
+
+    }
+
+
+# ============================================================
+# PRE-SIGNAL MESSAGE
+# ============================================================
+
+def make_presignal_message(
+    market,
+    setup,
+    price
+):
+
+    direction = setup[
+        "direction"
+    ]
+
+    emoji = (
+        "🟡"
+        if direction == "BUY"
+        else "🟠"
+    )
+
+    return (
+
+        f"{emoji} V11.8 SETUP DEVELOPING\n\n"
+
+        f"{market} {direction}\n\n"
+
+        f"Current price: "
+        f"{fmt_price(market, price)}\n"
+
+        f"Live score: "
+        f"{setup['score']:.2f}\n\n"
+
+        "Conditions are developing "
+        "toward a potential V11.8 signal.\n\n"
+
+        "DO NOT ENTER YET.\n"
+
+        "Prepare MT5 and wait for "
+        "confirmation."
+    )
+
+
+# ============================================================
+# CONFIRMED MESSAGE
+# ============================================================
+
+def make_signal_message(
+    signal
+):
+
+    market = signal[
+        "market"
+    ]
+
+    direction = signal[
+        "direction"
+    ]
+
+    emoji = (
+        "🟢"
+        if direction == "BUY"
+        else "🔴"
+    )
+
+    return (
+
+        f"{emoji} V11.8 SIGNAL CONFIRMED\n\n"
+
+        f"{market} {direction}\n\n"
+
+        f"Entry: "
+        f"{fmt_price(market, signal['entry'])}\n"
+
+        f"SL: "
+        f"{fmt_price(market, signal['sl'])}\n"
+
+        f"TP: "
+        f"{fmt_price(market, signal['tp'])}\n\n"
+
+        f"RR: "
+        f"{signal['rr']:.2f}\n"
+
+        f"Score: "
+        f"{signal['score']:.2f}\n\n"
+
+        f"Signal candle: "
+        f"{signal['signal_time'].strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+
+        "LIVE ENTRY PRICE VERIFIED\n"
+
+        "MANUAL MT5 EXECUTION"
+    )
+
+
+# ============================================================
+# STATUS / DASH
+# ============================================================
+
+def make_status():
+
+    lines = [
+
+        "🟢 V11.8 SIGNALS BOT",
+
+        "",
+
+        "STATUS: RUNNING",
+
+        "MODE: CONTINUOUS",
+
+        "DATA: DUKASCOPY",
+
+        "",
+
+    ]
+
+    for market in MARKETS:
+
+        quote = market_quotes.get(
+            market
+        )
+
+        df = market_data.get(
+            market
+        )
+
+        if quote is None:
+
+            lines.append(
+                f"{market}: NO LIVE PRICE"
+            )
+
+            continue
+
+        price = quote[
+            "mid"
+        ]
+
+        if df is not None:
+
+            candle = df.iloc[-1]
+
+            candle_time = (
+                pd.Timestamp(
+                    candle["time"]
+                )
+                .strftime(
+                    "%H:%M UTC"
+                )
+            )
+
+        else:
+
+            candle_time = "N/A"
+
+        lines.append(
+
+            f"{market}: "
+            f"{fmt_price(market, price)}"
+        )
+
+        lines.append(
+
+            f"  15m candle: "
+            f"{candle_time}"
+        )
+
+    return "\n".join(
+        lines
+    )
+
+
+def make_report():
+
+    report = [
+
+        "📊 V11.8 MARKET REPORT",
+
+        "",
+
+        "Continuous live monitoring",
+
+        "Data source: Dukascopy",
+
+        "",
+
+    ]
+
+    for market in MARKETS:
+
+        quote = market_quotes.get(
+            market
+        )
+
+        df = market_data.get(
+            market
+        )
+
+        report.append(
+            f"{market}"
+        )
+
+        if quote is None:
+
+            report.append(
+                "Price: unavailable"
+            )
+
+            report.append("")
+
+            continue
+
+        report.append(
+
+            "Price: "
+            + fmt_price(
+                market,
+                quote["mid"]
+            )
+        )
+
+        if df is not None:
+
+            prepared = (
+                prepare_indicators(
+                    df
+                )
+            )
+
+            if len(prepared) >= 100:
+
+                row = prepared.iloc[-1]
+
+                score = calculate_score(
+
+                    row,
+
+                    MARKETS[market]
+                )
+
+                if score is not None:
+
+                    if score >= 0.75:
+
+                        setup = "BUY developing"
+
+                    elif score <= -0.75:
+
+                        setup = "SELL developing"
+
+                    else:
+
+                        setup = "No active setup"
+
+                    report.append(
+                        "Setup: "
+                        + setup
+                    )
+
+                    report.append(
+
+                        "Score: "
+                        + f"{score:.2f}"
+                    )
+
+        report.append("")
+
+    return "\n".join(
+        report
+    )
+
+
+# ============================================================
+# TELEGRAM COMMAND PROCESSOR
+# ============================================================
+
+def process_telegram_commands():
+
+    global telegram_offset
+
+    updates = (
+        get_telegram_updates()
+    )
+
+    for update in updates:
+
+        update_id = update.get(
+            "update_id"
+        )
+
+        if update_id is not None:
+
+            telegram_offset = (
+                update_id + 1
+            )
+
+        message = update.get(
+            "message"
+        )
+
+        if not message:
+
+            continue
+
+        chat = message.get(
+            "chat",
+            {}
+        )
+
+        chat_id = str(
+            chat.get(
+                "id",
+                ""
+            )
         )
 
         if (
-            low is None
-            or high is None
+            chat_id
+            != str(
+                TELEGRAM_CHAT_ID
+            )
         ):
 
             continue
 
-        low = float(low)
-        high = float(high)
+        text = str(
+            message.get(
+                "text",
+                ""
+            )
+        ).strip().lower()
 
-        # ----------------------------------------------------
-        # BEARISH -> RESISTANCE ABOVE PRICE
-        # ----------------------------------------------------
-
-        if (
-            overall_bias == "BEARISH"
-            and zone_type == "resistance"
-            and price < low
+        if text in (
+            "/dash",
+            "/status",
         ):
 
-            distance = (
-                low
-                - price
+            send_telegram(
+                make_status()
             )
 
-            if (
-                distance
-                <= AOI_APPROACH_DISTANCE
-            ):
-
-                return {
-                    "direction": "SELL",
-                    "zone": zone,
-                    "distance": distance
-                }
-
-        # ----------------------------------------------------
-        # BULLISH -> SUPPORT BELOW PRICE
-        # ----------------------------------------------------
-
-        if (
-            overall_bias == "BULLISH"
-            and zone_type == "support"
-            and price > high
+        elif text in (
+            "/report",
+            "/market",
         ):
 
-            distance = (
-                price
-                - high
+            send_telegram(
+                make_report()
             )
 
-            if (
-                distance
-                <= AOI_APPROACH_DISTANCE
-            ):
+        elif text == "/start":
 
-                return {
-                    "direction": "BUY",
-                    "zone": zone,
-                    "distance": distance
-                }
+            send_telegram(
 
-    return None
+                "🟢 V11.8 SIGNAL BOT\n\n"
 
+                "Continuous monitoring active.\n\n"
 
-# ============================================================
-# TELEGRAM MESSAGE FORMATTING
-# ============================================================
-
-def format_watch_message(
-    watch,
-    price,
-    bias
-):
-
-    zone = watch["zone"]
-
-    return (
-        "XAUUSD APPROACHING SETUP\n\n"
-
-        "Direction: "
-        + watch["direction"]
-        + "\n"
-
-        "Current Price: "
-        + str(round(price, 2))
-        + "\n"
-
-        "Bias: "
-        + str(
-            bias.get(
-                "overall",
-                "UNKNOWN"
+                "Commands:\n"
+                "/dash\n"
+                "/report\n"
+                "/status"
             )
-        )
-        + "\n"
-
-        "AOI Timeframe: "
-        + str(
-            zone.get(
-                "timeframe",
-                "UNKNOWN"
-            )
-        )
-        + "\n"
-
-        "AOI Type: "
-        + str(
-            zone.get(
-                "type",
-                "UNKNOWN"
-            )
-        )
-        + "\n"
-
-        "AOI: "
-        + str(
-            zone.get("low")
-        )
-        + " - "
-        + str(
-            zone.get("high")
-        )
-        + "\n"
-
-        "Distance: "
-        + str(
-            round(
-                watch["distance"],
-                2
-            )
-        )
-        + "\n\n"
-
-        "EARLY WARNING ONLY\n"
-        "Confirmation is still required."
-    )
-
-
-def format_signal_message(
-    signal,
-    price
-):
-
-    bias = signal.get(
-        "bias",
-        {}
-    )
-
-    message = (
-        "XAUUSD SIGNAL\n\n"
-
-        "Signal: "
-        + str(
-            signal.get(
-                "signal",
-                "UNKNOWN"
-            )
-        )
-        + "\n"
-
-        "Price: "
-        + str(
-            round(price, 2)
-        )
-        + "\n"
-
-        "Reason: "
-        + str(
-            signal.get(
-                "reason",
-                "UNKNOWN"
-            )
-        )
-        + "\n"
-
-        "Weekly Bias: "
-        + str(
-            bias.get(
-                "weekly",
-                "UNKNOWN"
-            )
-        )
-        + "\n"
-
-        "Daily Bias: "
-        + str(
-            bias.get(
-                "daily",
-                "UNKNOWN"
-            )
-        )
-        + "\n"
-
-        "4H Bias: "
-        + str(
-            bias.get(
-                "4h",
-                "UNKNOWN"
-            )
-        )
-        + "\n"
-
-        "Overall Bias: "
-        + str(
-            bias.get(
-                "overall",
-                "UNKNOWN"
-            )
-        )
-    )
-
-    aoi = signal.get(
-        "aoi"
-    )
-
-    if isinstance(
-        aoi,
-        dict
-    ):
-
-        message += (
-            "\n\nAOI: "
-            + str(
-                aoi.get("low")
-            )
-            + " - "
-            + str(
-                aoi.get("high")
-            )
-        )
-
-    if signal.get(
-        "entry"
-    ) is not None:
-
-        message += (
-            "\n\nEntry: "
-            + str(
-                round(
-                    signal["entry"],
-                    2
-                )
-            )
-        )
-
-    if signal.get(
-        "stop_loss"
-    ) is not None:
-
-        message += (
-            "\nStop Loss: "
-            + str(
-                round(
-                    signal["stop_loss"],
-                    2
-                )
-            )
-        )
-
-    if signal.get(
-        "take_profit"
-    ) is not None:
-
-        message += (
-            "\nTake Profit: "
-            + str(
-                round(
-                    signal["take_profit"],
-                    2
-                )
-            )
-        )
-
-    return message
-
-
-# ============================================================
-# REPORT
-# ============================================================
-
-def send_report(
-    price,
-    price_source,
-    price_trusted,
-    signal,
-    data_daily,
-    last_data_refresh,
-    last_heartbeat
-):
-
-    bias = signal.get(
-        "bias",
-        {}
-    )
-
-    # IMPORTANT:
-    # Pass the CURRENT PRICE into the AOI engine.
-    areas = get_all_aois(
-        data_daily,
-        price
-    )
-
-    report = (
-        "XAUUSD MARKET REPORT\n\n"
-
-        "PRICE\n"
-        "Current: "
-        + str(
-            round(price, 2)
-        )
-        + "\n"
-
-        "Source: "
-        + price_source
-        + "\n"
-
-        "Trusted: "
-        + (
-            "YES"
-            if price_trusted
-            else "NO"
-        )
-
-        + "\n\n"
-
-        "BIAS\n"
-
-        "Weekly: "
-        + str(
-            bias.get(
-                "weekly",
-                "UNKNOWN"
-            )
-        )
-        + "\n"
-
-        "Daily: "
-        + str(
-            bias.get(
-                "daily",
-                "UNKNOWN"
-            )
-        )
-        + "\n"
-
-        "4H: "
-        + str(
-            bias.get(
-                "4h",
-                "UNKNOWN"
-            )
-        )
-        + "\n"
-
-        "Overall: "
-        + str(
-            bias.get(
-                "overall",
-                "UNKNOWN"
-            )
-        )
-
-        + "\n\n"
-
-        "SIGNAL\n"
-
-        "Status: "
-        + str(
-            signal.get(
-                "signal",
-                "NONE"
-            )
-        )
-        + "\n"
-
-        "Reason: "
-        + str(
-            signal.get(
-                "reason",
-                "UNKNOWN"
-            )
-        )
-    )
-
-    # ========================================================
-    # NEAREST AOIs
-    # ========================================================
-
-    if areas:
-
-        report += (
-            "\n\nNEAREST RELEVANT AOIs"
-        )
-
-        # Only show the closest 6.
-        for zone in areas[:6]:
-
-            zone_type = str(
-                zone.get(
-                    "type",
-                    "UNKNOWN"
-                )
-            ).upper()
-
-            timeframe = str(
-                zone.get(
-                    "timeframe",
-                    "UNKNOWN"
-                )
-            ).upper()
-
-            low = zone.get(
-                "low",
-                "?"
-            )
-
-            high = zone.get(
-                "high",
-                "?"
-            )
-
-            touches = zone.get(
-                "touches",
-                "N/A"
-            )
-
-            distance = zone.get(
-                "distance"
-            )
-
-            if distance is None:
-
-                distance_text = "N/A"
-
-            else:
-
-                distance_text = str(
-                    round(
-                        float(distance),
-                        2
-                    )
-                )
-
-            report += (
-                "\n\n"
-                + timeframe
-                + " "
-                + zone_type
-                + "\n"
-
-                "Zone: "
-                + str(low)
-                + " - "
-                + str(high)
-                + "\n"
-
-                "Distance: "
-                + distance_text
-                + "\n"
-
-                "Recent Touches: "
-                + str(touches)
-                + "\n"
-
-                "Structure Bias: "
-                + str(
-                    zone.get(
-                        "structure_bias",
-                        "N/A"
-                    )
-                )
-            )
-
-    else:
-
-        report += (
-            "\n\nNEAREST RELEVANT AOIs\n"
-            "No relevant AOIs within "
-            + str(
-                300
-            )
-            + " points of current price."
-        )
-
-    # ========================================================
-    # TRADE LEVELS
-    # ========================================================
-
-    if signal.get(
-        "entry"
-    ) is not None:
-
-        report += (
-            "\n\nTRADE LEVELS\n"
-
-            "Entry: "
-            + str(
-                round(
-                    signal["entry"],
-                    2
-                )
-            )
-        )
-
-    if signal.get(
-        "stop_loss"
-    ) is not None:
-
-        report += (
-            "\nStop Loss: "
-            + str(
-                round(
-                    signal["stop_loss"],
-                    2
-                )
-            )
-        )
-
-    if signal.get(
-        "take_profit"
-    ) is not None:
-
-        report += (
-            "\nTake Profit: "
-            + str(
-                round(
-                    signal["take_profit"],
-                    2
-                )
-            )
-        )
-
-    # ========================================================
-    # APPROACHING SETUP
-    # ========================================================
-
-    watch = find_approaching_aoi(
-        data_daily,
-        bias,
-        price
-    )
-
-    if watch:
-
-        zone = watch["zone"]
-
-        report += (
-            "\n\nAPPROACHING SETUP\n"
-
-            "Direction: "
-            + watch["direction"]
-            + "\n"
-
-            "Timeframe: "
-            + str(
-                zone.get(
-                    "timeframe",
-                    "UNKNOWN"
-                )
-            )
-            + "\n"
-
-            "AOI: "
-            + str(
-                zone.get("low")
-            )
-            + " - "
-            + str(
-                zone.get("high")
-            )
-            + "\n"
-
-            "Distance: "
-            + str(
-                round(
-                    watch["distance"],
-                    2
-                )
-            )
-        )
-
-    # ========================================================
-    # BOT STATUS
-    # ========================================================
-
-    report += (
-        "\n\nBOT STATUS\n"
-
-        "Status: ONLINE\n"
-
-        "Last data refresh: "
-        + datetime.fromtimestamp(
-            last_data_refresh
-        ).strftime(
-            "%H:%M:%S"
-        )
-
-        + "\n"
-
-        "Last heartbeat: "
-        + datetime.fromtimestamp(
-            last_heartbeat
-        ).strftime(
-            "%H:%M:%S"
-        )
-    )
-
-    send_telegram(
-        report
-    )
 
 
 # ============================================================
 # STARTUP
 # ============================================================
 
-print()
-print("=" * 60)
-print("LIVE XAUUSD SIGNAL BOT")
-print("=" * 60)
-print()
+def startup():
 
-print(
-    "Loading historical market data..."
-)
+    log(
+        "=" * 60
+    )
 
-data_15m, data_daily = (
-    get_market_data()
-)
+    log(
+        "V11.8 CONTINUOUS "
+        "DUKASCOPY SIGNAL BOT"
+    )
 
-print(
-    "Historical data loaded:",
-    len(data_15m),
-    "15m candles |",
-    len(data_daily),
-    "daily candles"
-)
+    log(
+        "=" * 60
+    )
 
-print()
-print(
-    "Live price: EVERY 1 SECOND"
-)
-print(
-    "Historical refresh: EVERY 60 SECONDS"
-)
-print(
-    "Telegram alerts: ENABLED"
-)
-print(
-    "Primary price source: Gold API"
-)
-print(
-    "Fallback price source: Yahoo Finance"
-)
-print(
-    "Maximum fallback discrepancy:",
-    MAX_PRICE_DISCREPANCY
-)
-print(
-    "AOI approach distance:",
-    AOI_APPROACH_DISTANCE
-)
-print(
-    "Telegram command: /report"
-)
-print(
-    "Waiting for BUY or SELL..."
-)
-print(
-    "Press Ctrl+C to stop."
-)
-print()
+    log(
+        "SIGNALS ONLY"
+    )
 
+    log(
+        "MANUAL MT5 EXECUTION"
+    )
 
-# ============================================================
-# STATE
-# ============================================================
+    log(
+        "NO AUTOMATIC TRADING"
+    )
 
-last_data_refresh = time.time()
-last_heartbeat = time.time()
+    log(
+        "LIVE DATA: DUKASCOPY"
+    )
 
-last_trusted_price = None
+    log(
+        "CHECK: EVERY 1 SECOND"
+    )
 
-last_signal_alert = None
-last_watch_alert = None
+    log(
+        "=" * 60
+    )
 
-last_price = None
-last_price_source = "NONE"
-last_price_trusted = False
+    for market, config in (
+        MARKETS.items()
+    ):
 
-last_signal = {
-    "signal": "NONE",
-    "reason": "BOT_STARTING",
-    "bias": {
-        "weekly": "UNKNOWN",
-        "daily": "UNKNOWN",
-        "4h": "UNKNOWN",
-        "overall": "UNKNOWN"
-    },
-    "aoi": None
-}
-
-telegram_offset = None
-
-
-# ============================================================
-# MAIN LOOP
-# ============================================================
-
-while True:
-
-    try:
-
-        # ----------------------------------------------------
-        # TELEGRAM COMMANDS
-        # ----------------------------------------------------
-
-        updates = get_telegram_updates(
-            telegram_offset
+        market_data[
+            market
+        ] = build_startup_history(
+            market,
+            config
         )
 
-        for update in updates:
+        market_state[
+            market
+        ] = {
 
-            telegram_offset = (
-                update["update_id"]
-                + 1
-            )
+            "last_candle":
+                None,
 
-            message = update.get(
-                "message"
-            )
+            "last_signal":
+                None,
 
-            if not message:
-                continue
+            "last_presignal":
+                None,
 
-            chat = message.get(
-                "chat",
-                {}
-            )
+            "last_presignal_time":
+                0,
 
-            chat_id = str(
-                chat.get(
-                    "id",
-                    ""
-                )
-            )
+        }
 
-            if chat_id != TELEGRAM_CHAT_ID:
-                continue
+    prices = (
+        get_current_prices()
+    )
 
-            text = message.get(
-                "text",
-                ""
-            ).strip().lower()
+    market_quotes.update(
+        prices
+    )
 
-            if text == "/report":
+    for market in MARKETS:
 
-                if last_price is None:
+        price = prices[
+            market
+        ]["mid"]
 
-                    send_telegram(
-                        "XAUUSD REPORT\n\n"
-                        "Bot is still loading "
-                        "market data. Try again "
-                        "in a few seconds."
-                    )
-
-                else:
-
-                    send_report(
-                        last_price,
-                        last_price_source,
-                        last_price_trusted,
-                        last_signal,
-                        data_daily,
-                        last_data_refresh,
-                        last_heartbeat
-                    )
-
-        # ----------------------------------------------------
-        # REFRESH DATA
-        # ----------------------------------------------------
-
-        if (
-            time.time()
-            - last_data_refresh
-            >= DATA_REFRESH_INTERVAL
-        ):
-
-            print()
-            print(
-                "Refreshing market data..."
-            )
-
-            data_15m, data_daily = (
-                get_market_data()
-            )
-
-            last_data_refresh = (
-                time.time()
-            )
-
-            print(
-                "Data refreshed:",
-                len(data_15m),
-                "15m candles |",
-                len(data_daily),
-                "daily candles"
-            )
-
-        # ----------------------------------------------------
-        # LIVE PRICE
-        # ----------------------------------------------------
-
-        price_data = get_live_price(
-            last_trusted_price
-        )
-
-        price = price_data[
-            "price"
-        ]
-
-        price_source = price_data[
-            "source"
-        ]
-
-        price_trusted = price_data[
-            "trusted"
-        ]
-
-        last_price = price
-        last_price_source = (
-            price_source
-        )
-        last_price_trusted = (
-            price_trusted
-        )
-
-        if price_trusted:
-
-            last_trusted_price = (
-                price
-            )
-
-        # ----------------------------------------------------
-        # UPDATE LIVE CANDLE
-        # ----------------------------------------------------
-
-        data_15m = update_live_candle(
-            data_15m,
+        ensure_current_candle(
+            market,
             price
         )
 
-        # ----------------------------------------------------
-        # STRATEGY
-        # ----------------------------------------------------
+        log(
 
-        signal = generate_signal(
-            data_15m,
-            data_daily,
-            price
+            f"{market}: "
+            f"live price "
+            f"{fmt_price(market, price)}"
         )
 
-        current_signal = signal.get(
-            "signal",
-            "NONE"
-        )
+    log(
+        "BACKSCAN COMPLETE."
+    )
 
-        last_signal = signal
+    log(
+        "LIVE MONITORING ACTIVE."
+    )
 
-        # ----------------------------------------------------
-        # CONFIRMED BUY / SELL
-        # ----------------------------------------------------
+    send_telegram(
 
-        if (
-            current_signal
-            in (
-                "BUY",
-                "SELL"
+        "🟢 SIGNALS BOT LIVE\n\n"
+
+        "V11.8 Continuous Multi-Market "
+        "Signal Bot is online.\n\n"
+
+        "Markets:\n"
+        "• XAUUSD\n"
+        "• EURUSD\n\n"
+
+        "Live Dukascopy monitoring:\n"
+        "Every second\n\n"
+
+        "Manual MT5 execution."
+    )
+
+
+# ============================================================
+# LIVE LOOP
+# ============================================================
+
+def live_loop():
+
+    last_heartbeat = 0
+
+    while True:
+
+        loop_start = time.time()
+
+        try:
+
+            prices = (
+                get_current_prices()
             )
-            and price_trusted
-        ):
 
-            alert_key = (
-                current_signal,
-                signal.get(
-                    "entry"
-                ),
-                signal.get(
-                    "stop_loss"
-                ),
-                signal.get(
-                    "take_profit"
+            with state_lock:
+
+                market_quotes.update(
+                    prices
                 )
-            )
 
-            if (
-                alert_key
-                != last_signal_alert
-            ):
+            for market in MARKETS:
 
-                send_telegram(
-                    format_signal_message(
-                        signal,
+                price = prices[
+                    market
+                ]["mid"]
+
+                previous_bucket = (
+                    current_bucket()
+                )
+
+                ensure_current_candle(
+                    market,
+                    price
+                )
+
+                # --------------------------------------------
+                # DEVELOPING SETUP
+                # --------------------------------------------
+
+                setup = (
+                    get_developing_setup(
+                        market
+                    )
+                )
+
+                if setup is not None:
+
+                    state = market_state[
+                        market
+                    ]
+
+                    candle_id = str(
+                        setup[
+                            "candle_time"
+                        ]
+                    )
+
+                    setup_id = (
+
+                        candle_id
+                        + "|"
+                        + setup["direction"]
+                    )
+
+                    now = time.time()
+
+                    if (
+
+                        state[
+                            "last_presignal"
+                        ]
+                        != setup_id
+
+                        and (
+
+                            now
+                            - state[
+                                "last_presignal_time"
+                            ]
+
+                            >=
+                            PRE_SIGNAL_COOLDOWN_SECONDS
+                        )
+
+                    ):
+
+                        message = (
+                            make_presignal_message(
+                                market,
+                                setup,
+                                price
+                            )
+                        )
+
+                        if send_telegram(
+                            message
+                        ):
+
+                            state[
+                                "last_presignal"
+                            ] = setup_id
+
+                            state[
+                                "last_presignal_time"
+                            ] = now
+
+                            log(
+                                f"{market}: "
+                                "PRE-SIGNAL SENT"
+                            )
+
+                # --------------------------------------------
+                # CHECK FOR NEW COMPLETED CANDLE
+                # --------------------------------------------
+
+                df = market_data[
+                    market
+                ]
+
+                if len(df) < 2:
+
+                    continue
+
+                completed_time = (
+                    pd.Timestamp(
+                        df.iloc[-2]["time"]
+                    )
+                )
+
+                state = market_state[
+                    market
+                ]
+
+                completed_id = str(
+                    completed_time
+                )
+
+                if (
+                    state[
+                        "last_candle"
+                    ]
+                    == completed_id
+                ):
+
+                    continue
+
+                state[
+                    "last_candle"
+                ] = completed_id
+
+                # --------------------------------------------
+                # CONFIRMED SIGNAL
+                # --------------------------------------------
+
+                signal = (
+                    get_confirmed_signal(
+                        market,
                         price
                     )
                 )
 
-                print()
-                print(
-                    "=" * 60
-                )
+                if signal is None:
 
-                print(
-                    datetime.now().strftime(
-                        "%Y-%m-%d %H:%M:%S"
+                    log(
+                        f"{market}: "
+                        "15m candle closed - "
+                        "no confirmed signal."
                     )
-                )
 
-                print(
-                    "SIGNAL:",
-                    current_signal
-                )
+                    continue
 
-                print(
-                    "PRICE:",
-                    round(
-                        price,
-                        2
-                    )
-                )
+                signal_id = (
 
-                print(
-                    "SOURCE:",
-                    price_source
-                )
-
-                print(
-                    "TELEGRAM: SIGNAL SENT"
-                )
-
-                print(
-                    "=" * 60
-                )
-
-                last_signal_alert = (
-                    alert_key
-                )
-
-                last_watch_alert = None
-
-        # ----------------------------------------------------
-        # APPROACHING AOI
-        # ----------------------------------------------------
-
-        elif price_trusted:
-
-            watch = (
-                find_approaching_aoi(
-                    data_daily,
-                    signal.get(
-                        "bias",
-                        {}
-                    ),
-                    price
-                )
-            )
-
-            if watch:
-
-                zone = watch[
-                    "zone"
-                ]
-
-                watch_key = (
-                    watch[
-                        "direction"
-                    ],
-                    zone.get(
-                        "timeframe"
-                    ),
-                    zone.get(
-                        "type"
-                    ),
-                    round(
-                        float(
-                            zone["low"]
-                        ),
-                        2
-                    ),
-                    round(
-                        float(
-                            zone["high"]
-                        ),
-                        2
-                    )
+                    completed_id
+                    + "|"
+                    + signal["direction"]
                 )
 
                 if (
-                    watch_key
-                    != last_watch_alert
+                    state[
+                        "last_signal"
+                    ]
+                    == signal_id
                 ):
 
-                    send_telegram(
-                        format_watch_message(
-                            watch,
-                            price,
-                            signal.get(
-                                "bias",
-                                {}
-                            )
-                        )
+                    continue
+
+                message = (
+                    make_signal_message(
+                        signal
+                    )
+                )
+
+                if send_telegram(
+                    message
+                ):
+
+                    state[
+                        "last_signal"
+                    ] = signal_id
+
+                    log(
+                        f"{market}: "
+                        "CONFIRMED SIGNAL SENT."
                     )
 
-                    print()
-                    print(
-                        "TELEGRAM: "
-                        "APPROACHING "
-                        + watch[
-                            "direction"
-                        ]
-                        + " ALERT SENT"
-                    )
+        except Exception as error:
 
-                    last_watch_alert = (
-                        watch_key
-                    )
+            log(
+                "LIVE LOOP ERROR: "
+                + type(error).__name__
+                + ": "
+                + str(error)
+            )
 
-            else:
+        # --------------------------------------------
+        # TELEGRAM COMMANDS
+        # --------------------------------------------
 
-                last_watch_alert = None
+        try:
 
-        # ----------------------------------------------------
+            process_telegram_commands()
+
+        except Exception as error:
+
+            log(
+                "COMMAND ERROR: "
+                + str(error)
+            )
+
+        # --------------------------------------------
         # HEARTBEAT
-        # ----------------------------------------------------
+        # --------------------------------------------
+
+        now = time.time()
 
         if (
-            time.time()
+            now
             - last_heartbeat
-            >= HEARTBEAT_INTERVAL
+            >= HEARTBEAT_SECONDS
         ):
 
-            print(
-                datetime.now().strftime(
-                    "%H:%M:%S"
-                ),
-                "| BOT ALIVE",
-                "| PRICE:",
-                round(
-                    price,
-                    2
-                ),
-                "| SOURCE:",
-                price_source,
-                "| TRUSTED:",
-                price_trusted,
-                "| SIGNAL:",
-                current_signal,
-                "| REASON:",
-                signal.get(
-                    "reason",
-                    "UNKNOWN"
-                ),
-                flush=True
+            log(
+                "HEARTBEAT | "
+                "BOT RUNNING | "
+                "XAUUSD="
+                + (
+                    fmt_price(
+                        "XAUUSD",
+                        market_quotes[
+                            "XAUUSD"
+                        ]["mid"]
+                    )
+                    if "XAUUSD"
+                    in market_quotes
+                    else "N/A"
+                )
+                + " | EURUSD="
+                + (
+                    fmt_price(
+                        "EURUSD",
+                        market_quotes[
+                            "EURUSD"
+                        ]["mid"]
+                    )
+                    if "EURUSD"
+                    in market_quotes
+                    else "N/A"
+                )
             )
 
-            last_heartbeat = (
-                time.time()
-            )
+            last_heartbeat = now
+
+        elapsed = (
+            time.time()
+            - loop_start
+        )
+
+        sleep_time = max(
+
+            0.1,
+
+            PRICE_INTERVAL_SECONDS
+            - elapsed
+        )
 
         time.sleep(
-            PRICE_INTERVAL
+            sleep_time
         )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+
+    startup()
+
+    live_loop()
+
+
+if __name__ == "__main__":
+
+    try:
+
+        main()
 
     except KeyboardInterrupt:
 
-        print()
-        print(
-            "BOT STOPPED"
+        log(
+            "BOT STOPPED MANUALLY."
         )
-
-        break
 
     except Exception as error:
 
-        print()
-        print(
-            "ERROR:",
-            error,
-            flush=True
+        log(
+            "FATAL ERROR: "
+            + type(error).__name__
+            + ": "
+            + str(error)
         )
 
-        time.sleep(1)
+        raise
