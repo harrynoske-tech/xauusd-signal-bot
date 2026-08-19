@@ -12,20 +12,9 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          MESSAGE="SIGNALS BOT LIVE
-
-V11.8 Multi-Market Signal Bot is now online.
-
-Markets: XAUUSD, EURUSD
-Frequency: Every 15 minutes
-Execution: Manual MT5
-Status: Monitoring for signals"
-
-          curl --fail --silent --show-error \
-            -X POST \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-            --data-urlencode "text=${MESSAGE}"
-
-          echo "Telegram startup message sent successfully."
+        run: >-
+          curl --fail --silent --show-error
+          -X POST
+          "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
+          --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}"
+          --data-urlencode "text=🟢 SIGNALS BOT LIVE - V11.8 Multi-Market Signal Bot is online - XAUUSD and EURUSD - Every 15 minutes - Manual MT5 execution"
