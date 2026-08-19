@@ -8,13 +8,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Send Telegram startup message
+      - name: Test Telegram startup message
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
         run: >-
-          curl --fail --silent --show-error
+          curl
+          -sS
           -X POST
           "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
           --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}"
-          --data-urlencode "text=🟢 SIGNALS BOT LIVE - V11.8 Multi-Market Signal Bot is online - XAUUSD and EURUSD - Every 15 minutes - Manual MT5 execution"
+          --data-urlencode "text=🟢 SIGNALS BOT LIVE - V11.8 Multi-Market Signal Bot is online"
+          -w "\nHTTP STATUS: %{http_code}\n"
